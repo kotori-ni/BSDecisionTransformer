@@ -1,11 +1,24 @@
+import os
+import logging
+
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'trajectory_collection_sac.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file)
+    ]
+)
+
 import numpy as np
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import os
-import logging
-import time
 from BS_EV_Environment_Base import BS_EV_Base
 
 class ReplayBuffer:
@@ -218,8 +231,8 @@ class SACAgent:
         self.critic_2.load_checkpoint()
 
 class BS_EV_SAC(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, error=1.0):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, error)
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
+        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file)
         self.agent = SACAgent(input_dims=self.n_states, n_actions=self.n_actions)
         self.training_steps = 1000000
         self.eval_interval = 1000
@@ -436,5 +449,5 @@ if __name__ == "__main__":
     plt.ylabel(f'Average Score (window={window})')
     plt.title('SAC Running Average Score')
     plt.grid()
-    plt.savefig('figure/learning_curve_SAC.png')
+    plt.savefig('Figure/learning_curve_SAC.png')
     print('训练完成，模型和学习曲线已保存。') 

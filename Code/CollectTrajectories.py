@@ -48,8 +48,8 @@ def main():
     else:
         trajectories = env.collect_trajectories(num_episodes)
 
-    os.makedirs('Trajectory', exist_ok=True)
-    save_path = f'Trajectory/trajectories_{model_key}_{args.episodes}.pkl'
+    os.makedirs('Trajectories', exist_ok=True)
+    save_path = f'Trajectories/trajectories_{model_key}_{args.episodes}.pkl'
     with open(save_path, 'wb') as f:
         pickle.dump(trajectories, f)
     print(f'轨迹已保存到: {save_path}')

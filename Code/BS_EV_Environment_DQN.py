@@ -1,13 +1,26 @@
+import os
+import logging
+
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'trajectory_collection_dqn.log')
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler(log_file)
+    ]
+)
+
 import numpy as np
 import torch as T
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import os
-import logging
 import random
 import time
-from collections import deque
 from BS_EV_Environment_Base import BS_EV_Base, charge2power, traffic2power, weather2power, charge2reward
 
 class ReplayBuffer:
@@ -40,7 +53,7 @@ class ReplayBuffer:
         return states, actions, rewards, states_, dones
 
 class DQNNetwork(nn.Module):
-    def __init__(self, input_dims, n_actions, fc1_dims=256, fc2_dims=256, name='dqn', chkpt_dir='../tmp/dqn'):
+    def __init__(self, input_dims, n_actions, fc1_dims=256, fc2_dims=256, name='dqn', chkpt_dir='../Models/dqn'):
         super(DQNNetwork, self).__init__()
         self.input_dims = input_dims
         self.fc1_dims = fc1_dims
@@ -73,7 +86,7 @@ class DQNNetwork(nn.Module):
 class DQNAgent:
     def __init__(self, input_dims, n_actions, gamma=0.99, epsilon=1.0, lr=0.0001,
                  mem_size=100000, batch_size=64, epsilon_min=0.01, epsilon_dec=5e-4,
-                 replace=1000, chkpt_dir='../tmp/dqn'):
+                 replace=1000, chkpt_dir='../Models/dqn'):
         self.gamma = gamma
         self.epsilon = epsilon
         self.lr = lr
@@ -146,8 +159,8 @@ class DQNAgent:
         self.q_next.load_checkpoint()
 
 class BS_EV_DQN(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, error=1.0):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, error)
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
+        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file)
         self.agent = DQNAgent(input_dims=self.n_states, n_actions=self.n_actions)
         self.training_steps = 1000000
         self.eval_interval = 1000
@@ -351,5 +364,5 @@ if __name__ == "__main__":
     plt.ylabel(f'Average Score (window={window})')
     plt.title('DQN Running Average Score')
     plt.grid()
-    plt.savefig('figure/learning_curve_DQN.png')
+    plt.savefig('Figure/learning_curve_DQN.png')
     print('训练完成，模型和学习曲线已保存。') 

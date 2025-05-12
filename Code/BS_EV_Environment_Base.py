@@ -4,9 +4,10 @@ import pickle
 import os
 import logging
 import random
+import json
 
 # 设置日志
-log_dir = os.path.join(os.path.dirname(__file__), '..', 'log')
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'environment.log')
 
@@ -18,6 +19,18 @@ logging.basicConfig(
         logging.FileHandler(log_file)
     ]
 )
+
+def load_config(config_file='config.json'):
+    """加载配置文件"""
+    try:
+        with open(config_file, 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error(f"配置文件 {config_file} 不存在")
+        raise
+    except json.JSONDecodeError:
+        logging.error(f"配置文件 {config_file} 格式错误")
+        raise
 
 # 根据天气条件（风速和光照强度）计算可再生能源（风能和光伏）的总功率
 def weather2power(weather, power_WT = 1000, power_PV = 1):
@@ -50,48 +63,98 @@ def traffic2power(traffic, traffic_max = 150):
     power_BS = 2 * traffic / traffic_max + 2
     return power_BS
 
+def check_file_exists(file_path):
+    """检查文件是否存在"""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"文件 {file_path} 不存在")
+
 # 读取电价数据
-def load_RTP(T=31, train_flag=True, start_idx=None):
+def load_RTP(T=31, train_flag=True, start_idx=None, config=None):
+    if config is None:
+        config = load_config()
+    
+    rtp_file = config['data']['RTP_file']
+    check_file_exists(rtp_file)
+    
     if start_idx is not None:
         skiprows = 24 * start_idx
     else:
         skiprows = 24 * random.randint(0, 570) if train_flag else 24 * random.randint(600, 699)
-    df = pd.read_table('../Data/RTP.csv', sep=",", nrows=24*T, skiprows=skiprows)
-    RTP = []
-    for _, row in df.iterrows():
-        price_str = str(row.iloc[1])
-        price = float(price_str[price_str.find("$")+1:])
-        RTP.append(price)
-    return RTP
+    
+    try:
+        df = pd.read_table(rtp_file, sep=",", nrows=24*T, skiprows=skiprows)
+        RTP = []
+        for _, row in df.iterrows():
+            price_str = str(row.iloc[1])
+            price = float(price_str[price_str.find("$")+1:])
+            RTP.append(price)
+        return RTP
+    except Exception as e:
+        logging.error(f"读取电价数据失败: {str(e)}")
+        raise
 
 # 读取天气数据
-def load_weather(T=31, train_flag=True):
-    if train_flag:
-        df = pd.read_table('../Data/weather.csv', sep=",", nrows=24*T, skiprows=24*random.randint(0, 570))
-    else:
-        df = pd.read_table('../Data/weather.csv', sep=",", nrows=24*T, skiprows=24*random.randint(600, 699))
+def load_weather(T=31, train_flag=True, config=None):
+    if config is None:
+        config = load_config()
     
-    weather = []
-    for _, row in df.iterrows():
-        data = str(row.iloc[1]).split(",")
-        weather.append([float(data[-2]), float(data[-4])])
-    return weather
+    weather_file = config['data']['weather_file']
+    check_file_exists(weather_file)
+    
+    try:
+        if train_flag:
+            df = pd.read_table(weather_file, sep=",", nrows=24*T, skiprows=24*random.randint(0, 570))
+        else:
+            df = pd.read_table(weather_file, sep=",", nrows=24*T, skiprows=24*random.randint(600, 699))
+        
+        weather = []
+        for _, row in df.iterrows():
+            data = str(row.iloc[1]).split(",")
+            weather.append([float(data[-2]), float(data[-4])])
+        return weather
+    except Exception as e:
+        logging.error(f"读取天气数据失败: {str(e)}")
+        raise
 
 # 读取通信流量数据
-def load_traffic(T=31, train_flag=True):
-    file = open("../Data/traffic", "rb")
-    bytes_list = pickle.load(file)
-    bytes_list = np.r_[bytes_list, bytes_list, bytes_list, bytes_list]
-    return list(bytes_list)
+def load_traffic(T=31, train_flag=True, config=None):
+    if config is None:
+        config = load_config()
+    
+    traffic_file = config['data']['traffic_file']
+    check_file_exists(traffic_file)
+    
+    try:
+        with open(traffic_file, "rb") as file:
+            bytes_list = pickle.load(file)
+            bytes_list = np.r_[bytes_list, bytes_list, bytes_list, bytes_list]
+            return list(bytes_list)
+    except Exception as e:
+        logging.error(f"读取通信流量数据失败: {str(e)}")
+        raise
 
 # 读取充电需求数据
-def load_charge(T=31, train_flag=True):
-    file = open("../Data/charge", "rb")
-    charge = pickle.load(file)
-    return charge.tolist()*31
+def load_charge(T=31, train_flag=True, config=None):
+    if config is None:
+        config = load_config()
+    
+    charge_file = config['data']['charge_file']
+    check_file_exists(charge_file)
+    
+    try:
+        with open(charge_file, "rb") as file:
+            charge = pickle.load(file)
+            return charge.tolist()*31
+    except Exception as e:
+        logging.error(f"读取充电需求数据失败: {str(e)}")
+        raise
 
 class BS_EV_Base:
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, error=1.0):
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
+        # 加载配置
+        self.config = load_config(config_file)
+        env_config = self.config['environment']
+        
         self.n_states = n_RTP + 2 * n_weather + n_traffic + 2 * n_charge + 1
         self.n_traffic = n_traffic
         self.n_actions = 3
@@ -103,24 +166,27 @@ class BS_EV_Base:
         self.n_RTP = n_RTP
         self.n_weather = n_weather
         self.T = 0
-        self.min_SOC = 0.2
-        self.SOC_charge_rate = 0.1
-        self.SOC_discharge_rate = 0.1
-        self.SOC_per_cost = 0.01
-        self.SOC_eff = 1.1
-        self.AC_DC_eff = 1.1
-        self.ESS_cap = 500
+        
+        # 从配置文件加载参数
+        self.min_SOC = env_config['min_SOC']
+        self.SOC_charge_rate = env_config['SOC_charge_rate']
+        self.SOC_discharge_rate = env_config['SOC_discharge_rate']
+        self.SOC_per_cost = env_config['SOC_per_cost']
+        self.SOC_eff = env_config['SOC_eff']
+        self.AC_DC_eff = env_config['AC_DC_eff']
+        self.ESS_cap = env_config['ESS_cap']
+        self.error = env_config['error']
+        
         self.n_charge = n_charge
-        self.error = error
         self.trajectories = []
 
     def reset(self):
         self.SOC = np.random.uniform(self.min_SOC, 1)
         self.T = 0
-        self.RTP = load_RTP(train_flag=False)
-        self.weather = load_weather(train_flag=False)
-        self.traffic = load_traffic()
-        self.charge = load_charge()
+        self.RTP = load_RTP(train_flag=False, config=self.config)
+        self.weather = load_weather(train_flag=False, config=self.config)
+        self.traffic = load_traffic(config=self.config)
+        self.charge = load_charge(config=self.config)
         return self._get_state()
 
     def _get_state(self):

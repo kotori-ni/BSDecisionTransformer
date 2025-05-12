@@ -1,0 +1,24 @@
+{
+    "environment": {
+        "min_SOC": 0.2,
+        "SOC_charge_rate": 0.1,
+        "SOC_discharge_rate": 0.1,
+        "SOC_per_cost": 0.01,
+        "SOC_eff": 1.1,
+        "AC_DC_eff": 1.1,
+        "ESS_cap": 500,
+        "error": 1.0
+    },
+    "data": {
+        "RTP_file": "../Data/RTP.csv",
+        "weather_file": "../Data/weather.csv",
+        "traffic_file": "../Data/traffic",
+        "charge_file": "../Data/charge"
+    },
+    "dp": {
+        "n_SOC_states": 100,
+        "gamma": 0.99,
+        "max_iterations": 1000,
+        "convergence_threshold": 1e-6
+    }
+} 

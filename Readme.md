@@ -1,8 +1,8 @@
-# 基站-电动车能量管理强化学习与决策变换器项目
+# 基站-电池能量管理DecisonTransformerTransformer项目
 
 ## 项目简介
 
-本项目旨在研究和实现基于强化学习（DQN、SAC、PPO、DP）与Decision Transformer（DT）的基站-电动车（BS-EV）能量管理策略。项目包含了环境建模、强化学习训练、轨迹收集、DT训练与评估等完整流程，支持灵活切换不同RL算法和轨迹来源，便于对比实验和复现。
+本项目旨在研究和实现基于强化学习（DQN、SAC、PPO、DP）与Decision Transformer的基站-电池能量管理策略。项目包含了环境建模、强化学习训练、轨迹收集、DT训练与评估等完整流程。
 
 ## 目录结构
 

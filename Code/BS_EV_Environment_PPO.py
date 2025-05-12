@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import random
 import pickle
 import os
@@ -9,12 +8,22 @@ import torch.optim as optim
 from torch.distributions.categorical import Categorical
 import logging
 import time
-from BS_EV_Environment_Base import BS_EV_Base
+from BS_EV_Environment_Base import (
+    BS_EV_Base, 
+    weather2power, 
+    charge2power, 
+    charge2reward, 
+    traffic2power,
+    load_RTP,
+    load_weather,
+    load_traffic,
+    load_charge
+)
 
 # 使用os.path.join来处理路径
-log_dir = os.path.join(os.path.dirname(__file__), '..', 'log')
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'trajectory_collection_ppo.log')
+log_file = os.path.join(log_dir, '/trajectory_collection_ppo.log')
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,80 +34,8 @@ logging.basicConfig(
     ]
 )
 
-# 根据天气条件（风速和光照强度）计算可再生能源（风能和光伏）的总功率
-def weather2power(weather, power_WT = 1000, power_PV = 1):
-    power_renergy = power_WT*weather[0] + power_PV*weather[1]
-    return power_renergy / 100
-
-# 根据充电需求和随机比例决定充电功率
-def charge2power(charge, pro):
-    # charge = [当前电池电量, 已安排的充电功率或充电需求]
-    if pro > (1-charge[0]-charge[1]):
-        power_charge = 0
-    else: 
-        power_charge = 50
-    return power_charge
-
-# 根据充电需求和误差计算奖励
-def charge2reward(charge, pro, error):
-    # error：误差因子，调整奖励计算
-    if pro > (1-charge[0]-charge[1]):
-        reward = 0
-    elif pro < charge[0]*error:
-        reward = 60
-    else:
-        reward = 100
-    return reward
-
-# 根据通信流量计算基站的功率需求
-def traffic2power(traffic, traffic_max = 150):
-    # 空载最低功率消耗为2
-    power_BS = 2 * traffic / traffic_max + 2
-    return power_BS
-
-# 读取电价数据
-def load_RTP(T=31, train_flag=True, start_idx=None):
-    if start_idx is not None:
-        skiprows = 24 * start_idx
-    else:
-        skiprows = 24 * random.randint(0, 570) if train_flag else 24 * random.randint(600, 699)
-    df = pd.read_table('../Data/RTP.csv', sep=",", nrows=24*T, skiprows=skiprows)
-    RTP = []
-    for _, row in df.iterrows():
-        price_str = str(row.iloc[1])
-        price = float(price_str[price_str.find("$")+1:])
-        RTP.append(price)
-    return RTP
-
-# 读取天气数据
-def load_weather(T=31, train_flag=True):
-    if train_flag:
-        df = pd.read_table('../Data/weather.csv', sep=",", nrows=24*T, skiprows=24*random.randint(0, 570))
-    else:
-        df = pd.read_table('../Data/weather.csv', sep=",", nrows=24*T, skiprows=24*random.randint(600, 699))
-    
-    weather = []
-    for _, row in df.iterrows():
-        data = str(row.iloc[1]).split(",")
-        weather.append([float(data[-2]), float(data[-4])])
-    return weather
-
-# 读取通信流量数据
-def load_traffic(T=31, train_flag=True):
-    file = open("../Data/traffic", "rb")
-    bytes_list = pickle.load(file)
-    bytes_list = np.r_[bytes_list, bytes_list, bytes_list, bytes_list]
-    return list(bytes_list)
-
-# 读取充电需求数据
-def load_charge(T=31, train_flag=True):
-    file = open("../Data/charge", "rb")
-    charge = pickle.load(file)
-    return charge.tolist()*31
-
-
 class ActorNetwork(nn.Module):
-    def __init__(self, n_actions, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../tmp/'):
+    def __init__(self, n_actions, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
         super(ActorNetwork, self).__init__()
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'actor_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'actor_torch_ppo_last')
@@ -127,7 +64,7 @@ class ActorNetwork(nn.Module):
 
 
 class CriticNetwork(nn.Module):
-    def __init__(self, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../tmp/'):
+    def __init__(self, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
         super(CriticNetwork, self).__init__()
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'critic_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'critic_torch_ppo_last')
@@ -179,8 +116,8 @@ class Agent:
 
 
 class BS_EV(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, train_flag=True, error=1.0):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, error)
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, train_flag=True, config_file='config.json'):
+        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file)
         self.train_flag = train_flag
         self.done = False
 
@@ -401,5 +338,5 @@ if __name__ == "__main__":
     plt.ylabel(f'Average Score (window={window})')
     plt.title('PPO Running Average Score')
     plt.grid()
-    plt.savefig('figure/learning_curve_PPO.png')
+    plt.savefig('Figure/learning_curve_PPO.png')
     print('训练完成，模型和学习曲线已保存。')

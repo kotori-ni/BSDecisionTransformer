@@ -1,5 +1,4 @@
 import numpy as np
-import pandas as pd
 import pickle
 import os
 import logging
@@ -8,7 +7,7 @@ from BS_EV_Environment_Base import BS_EV_Base
 
 
 # 设置日志
-log_dir = os.path.join(os.path.dirname(__file__), '..', 'log')
+log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'trajectory_collection_dp.log')
 
@@ -22,17 +21,28 @@ logging.basicConfig(
 )
 
 class BS_EV_DP(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, error=1.0):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, error)
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
+        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file)
         
-        # 动态规划相关参数
-        self.SOC_states = np.linspace(self.min_SOC, 1.0, 50)  # 将SOC离散化为50个状态
-        self.gamma = 0.99  # 折扣因子
-        self.max_iterations = 1000  # 最大迭代次数
-        self.convergence_threshold = 1e-6  # 收敛阈值
+        # 从配置文件加载DP相关参数
+        dp_config = self.config['dp']
+        self.SOC_states = np.linspace(self.min_SOC, 1.0, dp_config['n_SOC_states'])
+        self.gamma = dp_config['gamma']
+        self.max_iterations = dp_config['max_iterations']
+        self.convergence_threshold = dp_config['convergence_threshold']
+        
+        # 初始化随机数生成器
+        self.rng = np.random.RandomState(int(time.time()))
 
     def _find_nearest_SOC_state(self, soc):
         return np.abs(self.SOC_states - soc).argmin()
+
+    def _is_action_feasible(self, soc, action):
+        if action == 1:  # 充电
+            return soc <= 1 - self.SOC_charge_rate
+        elif action == 2:  # 放电
+            return soc >= self.min_SOC + self.SOC_discharge_rate
+        return True
 
     def value_iteration(self):
         logging.info("Starting value iteration...")
@@ -41,8 +51,13 @@ class BS_EV_DP(BS_EV_Base):
         V = np.zeros((len(self.SOC_states), 24*30))
         policy = np.zeros((len(self.SOC_states), 24*30), dtype=int)
         
+        # 记录迭代过程中的统计信息
+        iteration_stats = []
+        
         for iteration in range(self.max_iterations):
             delta = 0
+            action_counts = {0: 0, 1: 0, 2: 0}  # 记录每个动作的选择次数
+            
             for t in range(24*30-1, -1, -1):
                 self.T = t
                 for s_idx, soc in enumerate(self.SOC_states):
@@ -51,19 +66,17 @@ class BS_EV_DP(BS_EV_Base):
                     
                     # 计算每个动作的价值
                     action_values = []
+                    feasible_actions = []
+                    
                     for action in range(3):
-                        if (soc < self.min_SOC + self.SOC_discharge_rate and action == 2) or \
-                           (soc > 1 - self.SOC_charge_rate and action == 1):
-                            action_values.append(float('-inf'))
+                        if not self._is_action_feasible(soc, action):
                             continue
                             
                         next_soc = self._get_next_SOC(action)
                         next_s_idx = self._find_nearest_SOC_state(next_soc)
                         
-                        # 使用当前时间作为随机种子
-                        current_time = int(time.time()) % (2**32 - 1)
-                        np.random.seed(current_time)
-                        pro = np.random.uniform(0, 1)
+                        # 使用随机数生成器生成随机数
+                        pro = self.rng.uniform(0, 1)
                         
                         reward = self._get_reward(action, pro)
                         if t < 24*30-1:
@@ -72,18 +85,40 @@ class BS_EV_DP(BS_EV_Base):
                             action_value = reward
                             
                         action_values.append(action_value)
+                        feasible_actions.append(action)
                     
                     # 更新价值函数和策略
                     if action_values:
-                        V[s_idx, t] = max(action_values)
-                        policy[s_idx, t] = np.argmax(action_values)
+                        best_action_idx = np.argmax(action_values)
+                        V[s_idx, t] = action_values[best_action_idx]
+                        policy[s_idx, t] = feasible_actions[best_action_idx]
+                        action_counts[feasible_actions[best_action_idx]] += 1
+                    else:
+                        # 如果没有可行动作，默认选择不操作
+                        V[s_idx, t] = 0
+                        policy[s_idx, t] = 0
+                        action_counts[0] += 1
                     
                     delta = max(delta, abs(v - V[s_idx, t]))
             
+            # 记录每次迭代的统计信息
+            iteration_stats.append({
+                'iteration': iteration + 1,
+                'delta': delta,
+                'action_distribution': action_counts
+            })
+            
             logging.info(f"Iteration {iteration + 1}, delta: {delta}")
+            logging.info(f"Action distribution: {action_counts}")
+            
             if delta < self.convergence_threshold:
                 logging.info("Value iteration converged!")
                 break
+        
+        # 记录最终的策略统计信息
+        logging.info("Final policy statistics:")
+        for action, count in action_counts.items():
+            logging.info(f"Action {action}: {count} times")
         
         return V, policy
 
@@ -94,6 +129,8 @@ class BS_EV_DP(BS_EV_Base):
         V, policy = self.value_iteration()
         
         trajectories = []
+        episode_stats = []  # 记录每个episode的统计信息
+        
         for episode in range(num_episodes):
             logging.info(f"Collecting trajectory for episode {episode + 1}/{num_episodes}")
             
@@ -109,6 +146,13 @@ class BS_EV_DP(BS_EV_Base):
             done = False
             episode_rewards = []
             
+            # 记录episode的统计信息
+            episode_stat = {
+                'soc_values': [],
+                'action_counts': {0: 0, 1: 0, 2: 0},
+                'rewards': []
+            }
+            
             while not done:
                 # 获取当前SOC对应的状态索引
                 soc_idx = self._find_nearest_SOC_state(self.SOC)
@@ -117,9 +161,7 @@ class BS_EV_DP(BS_EV_Base):
                 action = policy[soc_idx, self.T]
                 
                 # 执行动作
-                current_time = int(time.time()) % (2**32 - 1)
-                np.random.seed(current_time)
-                pro = np.random.uniform(0, 1)
+                pro = self.rng.uniform(0, 1)
                 
                 reward = self._get_reward(action, pro)
                 self.SOC = self._get_next_SOC(action)
@@ -131,6 +173,11 @@ class BS_EV_DP(BS_EV_Base):
                 trajectory['rewards'].append(np.array(reward, dtype=np.float32))
                 trajectory['dones'].append(np.array(done, dtype=bool))
                 episode_rewards.append(reward)
+                
+                # 更新统计信息
+                episode_stat['soc_values'].append(self.SOC)
+                episode_stat['action_counts'][action] += 1
+                episode_stat['rewards'].append(reward)
                 
                 state = self._get_state()
                 done = (self.T >= 24*30)
@@ -144,21 +191,38 @@ class BS_EV_DP(BS_EV_Base):
             trajectory['rtgs'] = rtgs
             
             trajectories.append(trajectory)
+            episode_stats.append(episode_stat)
+            
+            # 记录episode的统计信息
             total_reward = sum(episode_rewards)
-            logging.info(f"Episode {episode + 1} completed with total reward: {total_reward:.2f}")
+            mean_soc = np.mean(episode_stat['soc_values'])
+            std_soc = np.std(episode_stat['soc_values'])
+            
+            logging.info(f"Episode {episode + 1} completed:")
+            logging.info(f"Total reward: {total_reward:.2f}")
+            logging.info(f"Mean SOC: {mean_soc:.3f}, Std SOC: {std_soc:.3f}")
+            logging.info(f"Action distribution: {episode_stat['action_counts']}")
         
         self.trajectories = trajectories
         
-        # 记录轨迹统计信息
+        # 记录整体统计信息
         total_rewards = [sum(t['rewards']) for t in trajectories]
+        all_socs = [soc for stat in episode_stats for soc in stat['soc_values']]
+        all_actions = [action for stat in episode_stats for action, count in stat['action_counts'].items() for _ in range(count)]
+        
         stats = {
             'mean_reward': np.mean(total_rewards),
             'std_reward': np.std(total_rewards),
             'min_reward': np.min(total_rewards),
             'max_reward': np.max(total_rewards),
-            'num_trajectories': len(trajectories)
+            'num_trajectories': len(trajectories),
+            'mean_soc': np.mean(all_socs),
+            'std_soc': np.std(all_socs),
+            'action_distribution': {
+                action: all_actions.count(action) for action in range(3)
+            }
         }
-        logging.info(f"Optimal trajectory collection completed. Statistics: {stats}")
+        logging.info(f"Trajectory collection completed. Statistics: {stats}")
         
         return trajectories
 
