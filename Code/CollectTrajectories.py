@@ -2,6 +2,7 @@ import argparse
 import os
 import sys
 import pickle
+from tqdm import tqdm  # 导入 tqdm 用于进度条
 
 # 动态导入
 sys.path.append(os.path.dirname(__file__))
@@ -36,18 +37,29 @@ def main():
     env_class = getattr(module, class_name)
     env = env_class()
 
-    print(f'正在使用{class_name}收集{num_episodes}条轨迹...')
+    print(f'正在使用 {class_name} 收集 {num_episodes} 条轨迹...')
 
-    if model_key == 'dp':
-        trajectories = env.collect_optimal_trajectories(num_episodes)
-    elif model_key == 'ppo':
-        # PPO需要policy参数
-        from BS_EV_Environment_PPO import Agent
-        policy = Agent(n_actions=env.n_actions, input_dims=env.n_states)
-        trajectories = env.collect_trajectories(num_episodes, policy)
-    else:
-        trajectories = env.collect_trajectories(num_episodes)
+    # 初始化轨迹列表
+    trajectories = []
 
+    # 使用 tqdm 包装 episode 循环，显示进度条
+    for episode in tqdm(range(num_episodes), desc="Collecting trajectories", unit="episode"):
+        if model_key == 'dp':
+            # DP 模型使用 collect_optimal_trajectories
+            episode_trajectories = env.collect_optimal_trajectories(1)  # 收集单条轨迹
+            trajectories.extend(episode_trajectories)
+        elif model_key == 'ppo':
+            # PPO 需要 policy 参数
+            from BS_EV_Environment_PPO import Agent
+            policy = Agent(n_actions=env.n_actions, input_dims=env.n_states)
+            episode_trajectories = env.collect_trajectories(1, policy)  # 收集单条轨迹
+            trajectories.extend(episode_trajectories)
+        else:
+            # DQN 和 SAC 使用 collect_trajectories
+            episode_trajectories = env.collect_trajectories(1)  # 收集单条轨迹
+            trajectories.extend(episode_trajectories)
+
+    # 保存轨迹
     os.makedirs('Trajectories', exist_ok=True)
     save_path = f'Trajectories/trajectories_{model_key}_{args.episodes}.pkl'
     with open(save_path, 'wb') as f:
@@ -55,4 +67,4 @@ def main():
     print(f'轨迹已保存到: {save_path}')
 
 if __name__ == '__main__':
-    main() 
+    main()

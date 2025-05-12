@@ -3,7 +3,7 @@ import pickle
 import os
 import logging
 import time
-from BS_EV_Environment_Base import BS_EV_Base
+from BS_EV_Environment_Base import BS_EV_Base, load_RTP, load_weather, load_traffic, load_charge
 
 
 # 设置日志
@@ -46,6 +46,12 @@ class BS_EV_DP(BS_EV_Base):
 
     def value_iteration(self):
         logging.info("Starting value iteration...")
+
+        # 初始化数据
+        self.RTP = load_RTP(train_flag=False, config=self.config)
+        self.weather = load_weather(train_flag=False, config=self.config)
+        self.traffic = load_traffic(config=self.config)
+        self.charge = load_charge(config=self.config)
         
         # 初始化价值函数和策略
         V = np.zeros((len(self.SOC_states), 24*30))
