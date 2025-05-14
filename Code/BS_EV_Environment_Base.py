@@ -10,14 +10,17 @@ import json
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'BS_EV_Environment.log')
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(log_file, encoding='utf-8')
-    ]
-)
+
+# 检查是否已经配置过日志
+if not logging.getLogger().handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(log_file, encoding='utf-8')
+        ]
+    )
 
 def load_config(config_file='config.json'):
     try:
@@ -51,7 +54,7 @@ def generate_pro_traces(n_traces=1000, T=31, train_flag=False, output_file="../D
         logging.error(f"生成 pro 序列失败: {str(e)}")
         raise
 
-def load_RTP(T=31, trace_idx=0, pro_traces=None, config=None):
+def load_RTP(train_flag, T=31, trace_idx=None, pro_traces=None, config=None,):
     if config is None:
         config = load_config()
     rtp_file = config['data']['RTP_file']
@@ -60,7 +63,16 @@ def load_RTP(T=31, trace_idx=0, pro_traces=None, config=None):
         if pro_traces is None:
             with open(config['data']['pro_traces_file'], 'rb') as file:
                 pro_traces = pickle.load(file)
-        skiprows = 24 * pro_traces[trace_idx]["start_idx"]
+        
+        # 确定skiprows
+        if trace_idx is not None:
+            skiprows = 24 * pro_traces[trace_idx]["start_idx"]
+        else:
+            if train_flag:
+                skiprows = 24 * np.random.randint(0, 570)  # 训练集范围
+            else:
+                skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
+                
         df = pd.read_table(rtp_file, sep=",", nrows=24*T, skiprows=skiprows)
         RTP = []
         for _, row in df.iterrows():
@@ -72,7 +84,7 @@ def load_RTP(T=31, trace_idx=0, pro_traces=None, config=None):
         logging.error(f"读取电价数据失败: {str(e)}")
         raise
 
-def load_weather(T=31, trace_idx=0, pro_traces=None, config=None):
+def load_weather(train_flag, T=31, trace_idx=None, pro_traces=None, config=None):
     if config is None:
         config = load_config()
     weather_file = config['data']['weather_file']
@@ -81,7 +93,16 @@ def load_weather(T=31, trace_idx=0, pro_traces=None, config=None):
         if pro_traces is None:
             with open(config['data']['pro_traces_file'], 'rb') as file:
                 pro_traces = pickle.load(file)
-        skiprows = 24 * pro_traces[trace_idx]["start_idx"]
+                
+        # 确定skiprows
+        if trace_idx is not None:
+            skiprows = 24 * pro_traces[trace_idx]["start_idx"]
+        else:
+            if train_flag:
+                skiprows = 24 * np.random.randint(0, 570)  # 训练集范围
+            else:
+                skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
+                
         df = pd.read_table(weather_file, sep=",", nrows=24*T, skiprows=skiprows)
         weather = []
         for _, row in df.iterrows():
@@ -127,6 +148,7 @@ class BS_EV_Base:
         self.n_RTP = n_RTP
         self.n_weather = n_weather
         self.trace_idx = trace_idx
+        self.mode = 'train'  # 新增：用于区分训练/验证/测试模式
         
         try:
             pro_traces_file = self.config['data']['pro_traces_file']
@@ -147,6 +169,40 @@ class BS_EV_Base:
         self.SOC_per_cost = self.config['environment']['SOC_per_cost']
         self.ESS_cap = self.config['environment']['ESS_cap']
         self.error = self.config['environment']['error']
+
+    def set_mode(self, mode):
+        """设置环境模式：'train', 'validation', 或 'test'"""
+        assert mode in ['train', 'validation', 'test'], f"Invalid mode: {mode}"
+        self.mode = mode
+
+    def reset(self, trace_idx=None, pro_trace=None):
+        """
+        重置环境
+        Args:
+            trace_idx: 测试集pro trace的索引，仅用于测试
+            pro_trace: 验证用的固定pro trace，仅用于验证
+        """
+        self.SOC = 0.5
+        self.T = 0
+        
+        # 加载RTP和天气数据（保持随机性）
+        self.RTP = load_RTP(train_flag=True, T=31, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+        self.weather = load_weather(train_flag=True, T=31, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+        self.traffic = load_traffic(config=self.config)
+        self.charge = load_charge(config=self.config)
+        
+        # 根据场景选择pro trace
+        if self.mode == 'test' and trace_idx is not None:
+            # 测试场景：使用测试集pro trace
+            self.current_pro_trace = self.pro_traces[trace_idx]["pro_trace"]
+        elif self.mode == 'validation' and pro_trace is not None:
+            # 验证场景：使用传入的固定pro trace
+            self.current_pro_trace = pro_trace
+        else:
+            # 训练场景：随机生成pro trace
+            self.current_pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
+        
+        return self._get_state()
 
     def charge2power(self, charge, pro):
         # 计算电动车充电功率
@@ -232,19 +288,6 @@ class BS_EV_Base:
         observation[1] = list(np.concatenate(observation[1]).flat)
         observation[3] = list(np.concatenate(observation[3]).flat)
         return list(np.concatenate(observation).flat)
-
-    def reset(self):
-        self.SOC = 0.5
-        self.T = 0
-        self.RTP = load_RTP(trace_idx=self.trace_idx, pro_traces=self.pro_traces, config=self.config)
-        self.weather = load_weather(trace_idx=self.trace_idx, pro_traces=self.pro_traces, config=self.config)
-        self.traffic = load_traffic(config=self.config)
-        self.charge = load_charge(config=self.config)
-        if self.trace_idx < len(self.pro_traces):
-            self.current_pro_trace = self.pro_traces[self.trace_idx]["pro_trace"]
-        else:
-            raise ValueError(f"trace_idx {self.trace_idx} 超出 pro 序列数量 {len(self.pro_traces)}")
-        return self._get_state()
 
     def step(self, action):
         reward = self._get_reward(action)

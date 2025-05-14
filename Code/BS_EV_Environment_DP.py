@@ -4,10 +4,12 @@ import os
 import logging
 from BS_EV_Environment_Base import BS_EV_Base, load_RTP, load_weather, load_traffic, load_charge
 
-# 设置日志
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'trajectory_collection_dp.log')
+
+logger = logging.getLogger()
+logger.handlers.clear()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,13 +23,14 @@ logging.basicConfig(
 class BS_EV_DP(BS_EV_Base):
     def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json', trace_idx=0):
         super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file, trace_idx)
+        self.set_mode('test')  # 默认设置为测试模式
         
         # 从配置文件加载DP相关参数
         dp_config = self.config['dp']
         self.SOC_states = np.linspace(self.min_SOC, 1.0, dp_config['n_SOC_states'])
         self.gamma = dp_config['gamma']
-        self.max_iterations = dp_config['max_iterations']  # 保留，兼容配置
-        self.convergence_threshold = dp_config['convergence_threshold']  # 保留，兼容配置
+        self.max_iterations = dp_config['max_iterations']
+        self.convergence_threshold = dp_config['convergence_threshold']
 
     def _find_nearest_SOC_state(self, soc):
         return np.abs(self.SOC_states - soc).argmin()
@@ -80,8 +83,8 @@ class BS_EV_DP(BS_EV_Base):
         logging.info(f"Trace {trace_idx}: Starting value iteration...")
 
         # 初始化数据
-        self.RTP = load_RTP(trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
-        self.weather = load_weather(trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+        self.RTP = load_RTP(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+        self.weather = load_weather(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
         self.traffic = load_traffic(config=self.config)
         self.charge = load_charge(config=self.config)
         self.current_pro_trace = self.pro_traces[trace_idx]["pro_trace"]
@@ -141,10 +144,14 @@ class BS_EV_DP(BS_EV_Base):
         return V, policy, trace_idx
 
     def collect_optimal_trajectories(self):
+        """在测试模式下收集最优轨迹"""
         logging.info(f"Starting optimal trajectory collection for {len(self.pro_traces)} traces")
         
         trajectories = []
-        trace_stats = []  # 记录每个trace的统计信息
+        trace_stats = []
+        
+        # 确保在测试模式下运行
+        self.set_mode('test')
         
         for trace_idx in range(len(self.pro_traces)):
             logging.info(f"Collecting trajectory for trace {trace_idx}/{len(self.pro_traces)-1}")
@@ -163,7 +170,7 @@ class BS_EV_DP(BS_EV_Base):
             
             # 重置环境，使用对应的 pro_trace
             self.trace_idx = trace_idx
-            state = self.reset()
+            state = self.reset(trace_idx=trace_idx)  # 使用测试集的trace_idx
             done = False
             episode_rewards = []
             
@@ -271,3 +278,4 @@ class BS_EV_DP(BS_EV_Base):
 if __name__ == "__main__":
     env = BS_EV_DP()
     trajectories = env.collect_optimal_trajectories()
+    env.save_trajectories()
