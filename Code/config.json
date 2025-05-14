@@ -13,7 +13,8 @@
         "RTP_file": "../Data/RTP.csv",
         "weather_file": "../Data/weather.csv",
         "traffic_file": "../Data/traffic",
-        "charge_file": "../Data/charge"
+        "charge_file": "../Data/charge",
+        "pro_traces_file": "../Data/pro_traces.pkl"
     },
     "dp": {
         "n_SOC_states": 100,
