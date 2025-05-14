@@ -6,7 +6,6 @@ import logging
 import random
 import json
 
-# 设置日志
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'environment.log')
@@ -21,7 +20,6 @@ logging.basicConfig(
 )
 
 def load_config(config_file='config.json'):
-    """加载配置文件"""
     try:
         with open(config_file, 'r') as f:
             return json.load(f)
@@ -32,44 +30,49 @@ def load_config(config_file='config.json'):
         logging.error(f"配置文件 {config_file} 格式错误")
         raise
 
-# 根据天气条件（风速和光照强度）计算可再生能源（风能和光伏）的总功率
-def weather2power(weather, power_WT = 1000, power_PV = 1):
-    power_renergy = power_WT*weather[0] + power_PV*weather[1]
+def weather2power(weather, power_WT=1000, power_PV=1):
+    # weather: [风速, 光照强度]
+    power_renergy = power_WT * weather[0] + power_PV * weather[1]
     return power_renergy / 100
 
-# 根据充电需求和随机比例决定充电功率
+# 根据电动车充电需求和随机比例决定充电功率
 def charge2power(charge, pro):
-    # charge = [当前电池电量, 已安排的充电功率或充电需求]
-    if pro > (1-charge[0]-charge[1]):
+    # charge: [当前电池电量 (0-1), 已安排的充电需求]
+    # pro: 表示充电决策的倾向
+    if pro > (1 - charge[0] - charge[1]):
         power_charge = 0
-    else: 
+    else:
         power_charge = 50
     return power_charge
 
-# 根据充电需求和误差计算奖励
+# 根据电动车充电需求和随机比例计算充电奖励
 def charge2reward(charge, pro, error):
-    # error：误差因子，调整奖励计算
-    if pro > (1-charge[0]-charge[1]):
+    # error: 误差因子，调整奖励的严格程度
+    if pro > (1 - charge[0] - charge[1]):
         reward = 0
-    elif pro < charge[0]*error:
+    elif pro < charge[0] * error:
         reward = 60
     else:
         reward = 100
     return reward
 
 # 根据通信流量计算基站的功率需求
-def traffic2power(traffic, traffic_max = 150):
-    # 空载最低功率消耗为2
+def traffic2power(traffic, traffic_max=150):
+    # traffic: 当前通信流量
+    # traffic_max: 最大通信流量，默认为 150
     power_BS = 2 * traffic / traffic_max + 2
     return power_BS
 
 def check_file_exists(file_path):
-    """检查文件是否存在"""
+    """检查指定文件是否存在"""
     if not os.path.exists(file_path):
         raise FileNotFoundError(f"文件 {file_path} 不存在")
 
-# 读取电价数据
+# 读取实时电价数据
 def load_RTP(T=31, train_flag=True, start_idx=None, config=None):
+    # T: 加载的天数（默认 31 天，每小时一行，共 24*T 行）
+    # train_flag: 是否为训练模式，决定随机偏移的范围
+    # start_idx: 指定起始天数（若提供则覆盖随机偏移）
     if config is None:
         config = load_config()
     
@@ -133,7 +136,7 @@ def load_traffic(T=31, train_flag=True, config=None):
         logging.error(f"读取通信流量数据失败: {str(e)}")
         raise
 
-# 读取充电需求数据
+# 读取电动车充电需求数据
 def load_charge(T=31, train_flag=True, config=None):
     if config is None:
         config = load_config()
@@ -144,44 +147,45 @@ def load_charge(T=31, train_flag=True, config=None):
     try:
         with open(charge_file, "rb") as file:
             charge = pickle.load(file)
-            return charge.tolist()*31
+            return charge.tolist() * 31
     except Exception as e:
         logging.error(f"读取充电需求数据失败: {str(e)}")
         raise
 
 class BS_EV_Base:
     def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
-        # 加载配置
         self.config = load_config(config_file)
         env_config = self.config['environment']
         
+        # 状态维度：电价 + 天气（风速和光照） + 通信流量 + 充电需求（电量和需求） + 电池电量（SOC）
         self.n_states = n_RTP + 2 * n_weather + n_traffic + 2 * n_charge + 1
         self.n_traffic = n_traffic
-        self.n_actions = 3
-        self.RTP = []
-        self.weather = []
-        self.traffic = []
-        self.charge = []
-        self.SOC = 0
+        self.n_actions = 3  # 动作：0-不操作，1-充电，2-放电
+        self.RTP = []  # 实时电价列表
+        self.weather = []  # 天气条件（风速和光照强度）
+        self.traffic = []  # 通信流量
+        self.charge = []  # 电动车充电需求
+        self.SOC = 0  # 储能系统当前电量（0-1）
         self.n_RTP = n_RTP
         self.n_weather = n_weather
-        self.T = 0
+        self.T = 0  # 当前时间步
         
-        # 从配置文件加载参数
-        self.min_SOC = env_config['min_SOC']
-        self.SOC_charge_rate = env_config['SOC_charge_rate']
-        self.SOC_discharge_rate = env_config['SOC_discharge_rate']
-        self.SOC_per_cost = env_config['SOC_per_cost']
-        self.SOC_eff = env_config['SOC_eff']
-        self.AC_DC_eff = env_config['AC_DC_eff']
-        self.ESS_cap = env_config['ESS_cap']
-        self.error = env_config['error']
+        # 从配置文件加载储能系统和环境参数
+        self.min_SOC = env_config['min_SOC']  # 最小电池电量
+        self.SOC_charge_rate = env_config['SOC_charge_rate']  # 充电速率
+        self.SOC_discharge_rate = env_config['SOC_discharge_rate']  # 放电速率
+        self.SOC_per_cost = env_config['SOC_per_cost']  # 每次充放电的固定成本
+        self.SOC_eff = env_config['SOC_eff']  # 储能系统充放电效率
+        self.AC_DC_eff = env_config['AC_DC_eff']  # AC/DC 转换效率
+        self.ESS_cap = env_config['ESS_cap']  # 储能系统容量
+        self.error = env_config['error']  # 充电奖励的误差因子
         
         self.n_charge = n_charge
-        self.trajectories = []
+        self.trajectories = []  # 存储轨迹数据
 
     def reset(self):
-        self.SOC = np.random.uniform(self.min_SOC, 1)
+        # 重置环境，初始化电池电量和数据
+        self.SOC = np.random.uniform(self.min_SOC, 1)  # 随机初始化电池电量
         self.T = 0
         self.RTP = load_RTP(train_flag=False, config=self.config)
         self.weather = load_weather(train_flag=False, config=self.config)
@@ -197,14 +201,15 @@ class BS_EV_Base:
             self.charge[self.T:self.T+self.n_charge],
             [self.SOC]
         ]
-        observation[1] = list(np.concatenate(observation[1]).flat)
-        observation[3] = list(np.concatenate(observation[3]).flat)
+        observation[1] = list(np.concatenate(observation[1]).flat)  # 展平天气数据（风速和光照）
+        observation[3] = list(np.concatenate(observation[3]).flat)  # 展平充电需求数据（电量和需求）
         return list(np.concatenate(observation).flat)
 
     def _get_reward(self, action, pro):
+        # 计算奖励，基于充电奖励、储能操作成本和电费成本
         action_SOC = action
         
-        # 如果电量过低无法放电或过高无法充电，强制不操作
+        # 防止电池过充或过放
         if (self.SOC < self.min_SOC + self.SOC_discharge_rate and action_SOC == 2) or \
            (self.SOC > 1 - self.SOC_charge_rate and action_SOC == 1):
             action_SOC = 0
@@ -212,22 +217,18 @@ class BS_EV_Base:
         # 计算储能操作成本
         SOC_cost = 0 if action_SOC == 0 else self.SOC_per_cost
         
-        power_charge = charge2power(self.charge[self.T], pro)
-        power_BS = traffic2power(self.traffic[self.T])
-        power_renergy = weather2power(self.weather[self.T])
+        power_charge = charge2power(self.charge[self.T], pro)  # 电动车充电功率
+        power_BS = traffic2power(self.traffic[self.T])  # 基站功率需求
+        power_renergy = weather2power(self.weather[self.T])  # 可再生能源功率
 
-        # 充电
-        if action_SOC == 1:
+        # 计算净用电量（从电网购买的电量）
+        if action_SOC == 1:  # 储能系统充电
             power = max(power_BS * self.AC_DC_eff + power_charge + \
                         self.SOC_charge_rate * self.ESS_cap * self.SOC_eff - power_renergy, 0)
-            
-        # 放电
-        elif action_SOC == 2:
+        elif action_SOC == 2:  # 储能系统放电
             power = max(power_BS + power_charge - \
                         self.SOC_discharge_rate * self.ESS_cap * self.SOC_eff - power_renergy, 0)
-            
-        # 不操作
-        else:
+        else:  # 不操作
             power = max(power_BS * self.AC_DC_eff + power_charge - power_renergy, 0)
 
         # 计算电费成本
@@ -240,6 +241,7 @@ class BS_EV_Base:
         return reward_charge - SOC_cost - power_cost
 
     def _get_next_SOC(self, action):
+        # 根据动作更新电池电量
         if action == 1:  # 充电
             return min(1.0, self.SOC + self.SOC_charge_rate)
         elif action == 2:  # 放电
@@ -252,19 +254,19 @@ class BS_EV_Base:
             os.makedirs(os.path.dirname(filename), exist_ok=True)
             with open(filename, 'wb') as f:
                 pickle.dump(self.trajectories, f)
-            logging.info(f"Trajectories saved to {filename}")
+            logging.info(f"轨迹数据已保存到 {filename}")
         except Exception as e:
-            logging.error(f"Error saving trajectories: {str(e)}")
+            logging.error(f"保存轨迹数据失败: {str(e)}")
             raise
 
     def load_trajectories(self, filename):
         try:
             if not os.path.exists(filename):
-                raise FileNotFoundError(f"Trajectory file {filename} not found")
+                raise FileNotFoundError(f"轨迹文件 {filename} 不存在")
             with open(filename, 'rb') as f:
                 self.trajectories = pickle.load(f)
-            logging.info(f"Trajectories loaded from {filename}")
+            logging.info(f"轨迹数据已从 {filename} 加载")
             return self.trajectories
         except Exception as e:
-            logging.error(f"Error loading trajectories: {str(e)}")
-            raise 
+            logging.error(f"加载轨迹数据失败: {str(e)}")
+            raise
