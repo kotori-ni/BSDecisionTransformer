@@ -19,7 +19,7 @@ from BS_EV_Environment_Base import (
 
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'ppo_training.log')
+log_file = os.path.join(log_dir, 'ppo.log')
 
 logger = logging.getLogger()
 logger.handlers.clear()

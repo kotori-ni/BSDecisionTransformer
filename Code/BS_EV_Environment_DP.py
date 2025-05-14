@@ -6,7 +6,7 @@ from BS_EV_Environment_Base import BS_EV_Base, load_RTP, load_weather, load_traf
 
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'trajectory_collection_dp.log')
+log_file = os.path.join(log_dir, 'dp.log')
 
 logger = logging.getLogger()
 logger.handlers.clear()
