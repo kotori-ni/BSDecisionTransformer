@@ -1,35 +1,48 @@
+import numpy as np
+import random
 import os
+import torch as T
+import torch.nn as nn
+import torch.optim as optim
+from torch.distributions.normal import Normal
 import logging
+import matplotlib.pyplot as plt
+from tqdm import tqdm
+import pickle
+from BS_EV_Environment_Base import (
+    BS_EV_Base, 
+    load_RTP,
+    load_weather,
+    load_traffic,
+    load_charge
+)
 
+# 设置日志
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
 os.makedirs(log_dir, exist_ok=True)
-log_file = os.path.join(log_dir, 'trajectory_collection_sac.log')
+log_file = os.path.join(log_dir, 'sac.log')
+
+logger = logging.getLogger()
+logger.handlers.clear()
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(),
-        logging.FileHandler(log_file)
+        logging.FileHandler(log_file, encoding='utf-8')
     ]
 )
 
-import numpy as np
-import torch as T
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-from BS_EV_Environment_Base import BS_EV_Base
-
 class ReplayBuffer:
-    def __init__(self, max_size, input_dims):
+    def __init__(self, max_size, input_dims, n_actions):
         self.mem_size = max_size
         self.mem_cntr = 0
-        self.state_memory = np.zeros((self.mem_size, input_dims))
-        self.new_state_memory = np.zeros((self.mem_size, input_dims))
-        self.action_memory = np.zeros(self.mem_size)
-        self.reward_memory = np.zeros(self.mem_size)
-        self.terminal_memory = np.zeros(self.mem_size, dtype=bool)
+        self.state_memory = np.zeros((self.mem_size, input_dims), dtype=np.float32)
+        self.new_state_memory = np.zeros((self.mem_size, input_dims), dtype=np.float32)
+        self.action_memory = np.zeros(self.mem_size, dtype=np.int32)
+        self.reward_memory = np.zeros(self.mem_size, dtype=np.float32)
+        self.terminal_memory = np.zeros(self.mem_size, dtype=np.bool_)
 
     def store_transition(self, state, action, reward, state_, done):
         index = self.mem_cntr % self.mem_size
@@ -42,412 +55,482 @@ class ReplayBuffer:
 
     def sample_buffer(self, batch_size):
         max_mem = min(self.mem_cntr, self.mem_size)
-        batch = np.random.choice(max_mem, batch_size)
+        batch = np.random.choice(max_mem, batch_size, replace=False)
         states = self.state_memory[batch]
-        states_ = self.new_state_memory[batch]
         actions = self.action_memory[batch]
         rewards = self.reward_memory[batch]
+        states_ = self.new_state_memory[batch]
         dones = self.terminal_memory[batch]
         return states, actions, rewards, states_, dones
 
-class CriticNetwork(nn.Module):
-    def __init__(self, input_dims, n_actions, fc1_dims=256, fc2_dims=256, name='critic', chkpt_dir='../tmp/sac'):
-        super(CriticNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
-        self.n_actions = n_actions
-        self.name = name
-        self.checkpoint_dir = chkpt_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name+'_sac')
+class ValueNetwork(nn.Module):
+    def __init__(self, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
+        super(ValueNetwork, self).__init__()
+        os.makedirs(chkpt_dir, exist_ok=True)
+        self.checkpoint_file_best = os.path.join(chkpt_dir, 'value_sac_best')
+        self.checkpoint_file_last = os.path.join(chkpt_dir, 'value_sac_last')
+        self.value = nn.Sequential(
+            nn.Linear(input_dims, fc1_dims),
+            nn.ReLU(),
+            nn.Linear(fc1_dims, fc2_dims),
+            nn.ReLU(),
+            nn.Linear(fc2_dims, 1)
+        )
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
+        self.to(self.device)
 
-        self.fc1 = nn.Linear(self.input_dims + n_actions, self.fc1_dims)
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        self.q = nn.Linear(self.fc2_dims, 1)
+    def forward(self, state):
+        value = self.value(state)
+        return value
 
-        self.optimizer = optim.Adam(self.parameters(), lr=3e-4)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cpu')
+    def save_checkpoint_best(self):
+        T.save(self.state_dict(), self.checkpoint_file_best)
+
+    def save_checkpoint_last(self):
+        T.save(self.state_dict(), self.checkpoint_file_last)
+
+    def load_checkpoint_best(self):
+        self.load_state_dict(T.load(self.checkpoint_file_best, map_location=self.device))
+
+    def load_checkpoint_last(self):
+        self.load_state_dict(T.load(self.checkpoint_file_last, map_location=self.device))
+
+class QNetwork(nn.Module):
+    def __init__(self, input_dims, n_actions, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
+        super(QNetwork, self).__init__()
+        os.makedirs(chkpt_dir, exist_ok=True)
+        self.checkpoint_file_best = os.path.join(chkpt_dir, self.__class__.__name__ + '_sac_best')
+        self.checkpoint_file_last = os.path.join(chkpt_dir, self.__class__.__name__ + '_sac_last')
+        self.q = nn.Sequential(
+            nn.Linear(input_dims + n_actions, fc1_dims),
+            nn.ReLU(),
+            nn.Linear(fc1_dims, fc2_dims),
+            nn.ReLU(),
+            nn.Linear(fc2_dims, 1)
+        )
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
     def forward(self, state, action):
-        action_value = self.fc1(T.cat([state, action], dim=1))
-        action_value = F.relu(action_value)
-        action_value = self.fc2(action_value)
-        action_value = F.relu(action_value)
-        q = self.q(action_value)
+        sa = T.cat([state, action], dim=-1)
+        q = self.q(sa)
         return q
 
-    def save_checkpoint(self):
-        T.save(self.state_dict(), self.checkpoint_file)
+    def save_checkpoint_best(self):
+        T.save(self.state_dict(), self.checkpoint_file_best)
 
-    def load_checkpoint(self):
-        self.load_state_dict(T.load(self.checkpoint_file))
+    def save_checkpoint_last(self):
+        T.save(self.state_dict(), self.checkpoint_file_last)
 
-class ValueNetwork(nn.Module):
-    def __init__(self, input_dims, fc1_dims=256, fc2_dims=256, name='value', chkpt_dir='../tmp/sac'):
-        super(ValueNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
-        self.name = name
-        self.checkpoint_dir = chkpt_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name+'_sac')
+    def load_checkpoint_best(self):
+        self.load_state_dict(T.load(self.checkpoint_file_best, map_location=self.device))
 
-        self.fc1 = nn.Linear(self.input_dims, self.fc1_dims)
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        self.v = nn.Linear(self.fc2_dims, 1)
+    def load_checkpoint_last(self):
+        self.load_state_dict(T.load(self.checkpoint_file_last, map_location=self.device))
 
-        self.optimizer = optim.Adam(self.parameters(), lr=3e-4)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cpu')
+class PolicyNetwork(nn.Module):
+    def __init__(self, input_dims, n_actions, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
+        super(PolicyNetwork, self).__init__()
+        os.makedirs(chkpt_dir, exist_ok=True)
+        self.checkpoint_file_best = os.path.join(chkpt_dir, 'policy_sac_best')
+        self.checkpoint_file_last = os.path.join(chkpt_dir, 'policy_sac_last')
+        self.fc1 = nn.Linear(input_dims, fc1_dims)
+        self.fc2 = nn.Linear(fc1_dims, fc2_dims)
+        self.mu = nn.Linear(fc2_dims, n_actions)
+        self.log_std = nn.Linear(fc2_dims, n_actions)
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
+        self.log_std_min = -20
+        self.log_std_max = 2
 
     def forward(self, state):
-        state_value = self.fc1(state)
-        state_value = F.relu(state_value)
-        state_value = self.fc2(state_value)
-        state_value = F.relu(state_value)
-        v = self.v(state_value)
-        return v
+        x = T.relu(self.fc1(state))
+        x = T.relu(self.fc2(x))
+        mu = self.mu(x)
+        log_std = self.log_std(x)
+        log_std = T.clamp(log_std, self.log_std_min, self.log_std_max)
+        return mu, log_std
 
-    def save_checkpoint(self):
-        T.save(self.state_dict(), self.checkpoint_file)
+    def sample(self, state):
+        mu, log_std = self.forward(state)
+        std = log_std.exp()
+        dist = Normal(mu, std)
+        z = dist.rsample()
+        action = T.softmax(z, dim=-1)
+        log_prob = dist.log_prob(z) - T.log(1 - action.pow(2) + 1e-6)
+        log_prob = log_prob.sum(dim=-1, keepdim=True)
+        return action, log_prob
 
-    def load_checkpoint(self):
-        self.load_state_dict(T.load(self.checkpoint_file))
+    def save_checkpoint_best(self):
+        T.save(self.state_dict(), self.checkpoint_file_best)
 
-class ActorNetwork(nn.Module):
-    def __init__(self, input_dims, n_actions, fc1_dims=256, fc2_dims=256, name='actor', chkpt_dir='../tmp/sac'):
-        super(ActorNetwork, self).__init__()
-        self.input_dims = input_dims
-        self.fc1_dims = fc1_dims
-        self.fc2_dims = fc2_dims
+    def save_checkpoint_last(self):
+        T.save(self.state_dict(), self.checkpoint_file_last)
+
+    def load_checkpoint_best(self):
+        self.load_state_dict(T.load(self.checkpoint_file_best, map_location=self.device))
+
+    def load_checkpoint_last(self):
+        self.load_state_dict(T.load(self.checkpoint_file_last, map_location=self.device))
+
+class Agent:
+    def __init__(self, n_actions, input_dims, max_action=1, gamma=0.99, alpha=0.0003, 
+                 tau=0.005, batch_size=64, reward_scale=1.0, target_entropy=-3.0, 
+                 buffer_size=1000000):
+        self.gamma = gamma
+        self.tau = tau
+        self.batch_size = batch_size
+        self.reward_scale = reward_scale
         self.n_actions = n_actions
-        self.name = name
-        self.checkpoint_dir = chkpt_dir
-        self.checkpoint_file = os.path.join(self.checkpoint_dir, name+'_sac')
-        self.reparam_noise = 1e-6
+        self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
 
-        self.fc1 = nn.Linear(self.input_dims, self.fc1_dims)
-        self.fc2 = nn.Linear(self.fc1_dims, self.fc2_dims)
-        self.mu = nn.Linear(self.fc2_dims, self.n_actions)
-        self.sigma = nn.Linear(self.fc2_dims, self.n_actions)
+        self.memory = ReplayBuffer(buffer_size, input_dims, n_actions)
+        
+        self.value = ValueNetwork(input_dims, alpha)
+        self.target_value = ValueNetwork(input_dims, alpha)
+        self.q1 = QNetwork(input_dims, n_actions, alpha)
+        self.q2 = QNetwork(input_dims, n_actions, alpha)
+        self.policy = PolicyNetwork(input_dims, n_actions, alpha)
+        
+        self.target_entropy = T.tensor(target_entropy, dtype=T.float32).to(self.device)
+        self.log_alpha = T.tensor(np.log(0.1), requires_grad=True, device=self.device)
+        self.alpha_optimizer = optim.Adam([self.log_alpha], lr=alpha)
+        
+        self.update_target_networks(tau=1.0)
 
-        self.optimizer = optim.Adam(self.parameters(), lr=3e-4)
-        self.device = T.device('cuda:0' if T.cuda.is_available() else 'cpu')
-        self.to(self.device)
-
-    def forward(self, state):
-        prob = self.fc1(state)
-        prob = F.relu(prob)
-        prob = self.fc2(prob)
-        prob = F.relu(prob)
-        mu = self.mu(prob)
-        sigma = self.sigma(prob)
-        sigma = T.clamp(sigma, min=self.reparam_noise, max=1)
-        return mu, sigma
-
-    def sample_normal(self, state, reparameterize=True):
-        mu, sigma = self.forward(state)
-        probabilities = T.distributions.Normal(mu, sigma)
-
-        if reparameterize:
-            actions = probabilities.rsample()
-        else:
-            actions = probabilities.sample()
-
-        action = T.tanh(actions)
-        log_probs = probabilities.log_prob(actions)
-        log_probs -= T.log(1-action.pow(2)+self.reparam_noise)
-        log_probs = log_probs.sum(1, keepdim=True)
-
-        return action, log_probs
-
-    def save_checkpoint(self):
-        T.save(self.state_dict(), self.checkpoint_file)
-
-    def load_checkpoint(self):
-        self.load_state_dict(T.load(self.checkpoint_file))
-
-class SACAgent:
-    def __init__(self, input_dims, n_actions, alpha=0.0003, beta=0.0003, reward_scale=2):
-        self.gamma = 0.99
-        self.tau = 0.005
-        self.memory = ReplayBuffer(1000000, input_dims)
-        self.batch_size = 256
-        self.n_actions = n_actions
-
-        self.actor = ActorNetwork(input_dims, n_actions)
-        self.critic_1 = CriticNetwork(input_dims, n_actions)
-        self.critic_2 = CriticNetwork(input_dims, n_actions)
-        self.value = ValueNetwork(input_dims)
-        self.target_value = ValueNetwork(input_dims)
-
-        self.scale = reward_scale
-        self.update_network_parameters(tau=1)
-
-        self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=alpha)
-        self.critic_1_optimizer = optim.Adam(self.critic_1.parameters(), lr=beta)
-        self.critic_2_optimizer = optim.Adam(self.critic_2.parameters(), lr=beta)
-        self.value_optimizer = optim.Adam(self.value.parameters(), lr=beta)
-
-    def choose_action(self, observation):
-        state = T.tensor([observation], dtype=T.float32).to(self.actor.device)
-        actions, _ = self.actor.sample_normal(state, reparameterize=False)
-        return actions.cpu().detach().numpy()[0]
-
-    def remember(self, state, action, reward, new_state, done):
-        self.memory.store_transition(state, action, reward, new_state, done)
-
-    def update_network_parameters(self, tau=None):
+    def update_target_networks(self, tau=None):
         if tau is None:
             tau = self.tau
+        for target_param, param in zip(self.target_value.parameters(), self.value.parameters()):
+            target_param.data.copy_(tau * param.data + (1 - tau) * target_param.data)
 
-        target_value_params = self.target_value.named_parameters()
-        value_params = self.value.named_parameters()
+    def save_models_best(self):
+        logging.info('... saving best models ...')
+        self.value.save_checkpoint_best()
+        self.q1.save_checkpoint_best()
+        self.q2.save_checkpoint_best()
+        self.policy.save_checkpoint_best()
 
-        target_value_state_dict = dict(target_value_params)
-        value_state_dict = dict(value_params)
+    def save_models_last(self):
+        logging.info('... saving last models ...')
+        self.value.save_checkpoint_last()
+        self.q1.save_checkpoint_last()
+        self.q2.save_checkpoint_last()
+        self.policy.save_checkpoint_last()
 
-        for name in value_state_dict:
-            value_state_dict[name] = T.nn.Parameter(
-                tau * value_state_dict[name].clone() + \
-                (1-tau) * target_value_state_dict[name].clone()
-            )
+    def load_models_best(self):
+        logging.info('... loading best models ...')
+        self.value.load_checkpoint_best()
+        self.q1.load_checkpoint_best()
+        self.q2.load_checkpoint_best()
+        self.policy.load_checkpoint_best()
 
-        self.target_value.load_state_dict(value_state_dict)
+    def load_models_last(self):
+        logging.info('... loading last models ...')
+        self.value.load_checkpoint_last()
+        self.q1.load_checkpoint_last()
+        self.q2.load_checkpoint_last()
+        self.policy.load_checkpoint_last()
 
-    def save_models(self):
-        self.actor.save_checkpoint()
-        self.value.save_checkpoint()
-        self.target_value.save_checkpoint()
-        self.critic_1.save_checkpoint()
-        self.critic_2.save_checkpoint()
+    def choose_action(self, observation, evaluate=False):
+        state = T.tensor([observation], dtype=T.float32).to(self.device)
+        if evaluate:
+            self.policy.eval()
+            with T.no_grad():
+                mu, _ = self.policy.forward(state)
+                action = T.softmax(mu, dim=-1)
+                action_idx = T.argmax(action, dim=-1).item()
+            self.policy.train()
+            return action_idx, None, None
+        else:
+            action, log_prob = self.policy.sample(state)
+            action_idx = T.argmax(action, dim=-1).item()
+            log_prob = log_prob.item()
+            return action_idx, action, log_prob
 
-    def load_models(self):
-        self.actor.load_checkpoint()
-        self.value.load_checkpoint()
-        self.target_value.load_checkpoint()
-        self.critic_1.load_checkpoint()
-        self.critic_2.load_checkpoint()
+    def learn(self):
+        if self.memory.mem_cntr < self.batch_size:
+            return
+        states, actions, rewards, states_, dones = self.sample_buffer(self.batch_size)
+        states = T.tensor(states, dtype=T.float32).to(self.device)
+        actions = T.tensor(actions, dtype=T.int64).to(self.device)
+        rewards = T.tensor(rewards, dtype=T.float32).to(self.device)
+        states_ = T.tensor(states_, dtype=T.float32).to(self.device)
+        dones = T.tensor(dones, dtype=T.bool).to(self.device)
+
+        value = self.value(states).view(-1)
+        value_ = self.target_value(states_).view(-1)
+        value_[dones] = 0.0
+
+        actions_one_hot = T.zeros(self.batch_size, self.n_actions, device=self.device)
+        actions_one_hot.scatter_(1, actions.unsqueeze(1), 1.0)
+
+        q1 = self.q1(states, actions_one_hot).view(-1)
+        q2 = self.q2(states, actions_one_hot).view(-1)
+
+        with T.no_grad():
+            actions_next, log_probs_next = self.policy.sample(states_)
+            q1_next = self.q1(states_, actions_next).view(-1)
+            q2_next = self.q2(states_, actions_next).view(-1)
+            q_next = T.min(q1_next, q2_next)
+            target = rewards + self.gamma * (value_ - T.exp(self.log_alpha) * log_probs_next.view(-1))
+
+        value_loss = ((value - T.min(q1, q2) + T.exp(self.log_alpha) * log_probs_next.view(-1)) ** 2).mean()
+        q1_loss = ((q1 - target.detach()) ** 2).mean()
+        q2_loss = ((q2 - target.detach()) ** 2).mean()
+
+        self.value.optimizer.zero_grad()
+        value_loss.backward()
+        self.value.optimizer.step()
+
+        self.q1.optimizer.zero_grad()
+        q1_loss.backward()
+        self.q1.optimizer.step()
+
+        self.q2.optimizer.zero_grad()
+        q2_loss.backward()
+        self.q2.optimizer.step()
+
+        actions_pi, log_probs_pi = self.policy.sample(states)
+        q1_pi = self.q1(states, actions_pi).view(-1)
+        q2_pi = self.q2(states, actions_pi).view(-1)
+        q_pi = T.min(q1_pi, q2_pi)
+        policy_loss = (T.exp(self.log_alpha) * log_probs_pi.view(-1) - q_pi).mean()
+
+        self.policy.optimizer.zero_grad()
+        policy_loss.backward()
+        self.policy.optimizer.step()
+
+        alpha_loss = -(self.log_alpha * (log_probs_pi.view(-1) + self.target_entropy).detach()).mean()
+
+        self.alpha_optimizer.zero_grad()
+        alpha_loss.backward()
+        self.alpha_optimizer.step()
+
+        self.update_target_networks()
+
+    def sample_buffer(self, batch_size):
+        return self.memory.sample_buffer(batch_size)
 
 class BS_EV_SAC(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json'):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file)
-        self.agent = SACAgent(input_dims=self.n_states, n_actions=self.n_actions)
-        self.training_steps = 1000000
-        self.eval_interval = 1000
-        self.best_reward = float('-inf')
-        
-        # 添加缺失的属性
-        self.charge_power = 0.1  # 充电功率
-        self.discharge_power = 0.1  # 放电功率
-        self.SOC_max = 1.0  # 最大SOC
-        self.SOC_min = 0.0  # 最小SOC
-        self.current_step = 0  # 当前步数
-        self.max_steps = 720  # 最大步数（24小时 * 30天）
-        self.SOC = 0.5  # 初始SOC
+    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json', train_flag=True):
+        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file, trace_idx=0)
+        self.n_actions = 3  # 充电、放电、不操作
+        self.n_states = n_RTP + n_weather * 2 + n_traffic + n_charge * 2 + 1  # 状态维度
+        self.gamma = self.config.get('sac', {}).get('gamma', 0.99)
+        self.train_flag = train_flag
+        self.set_mode('train' if train_flag else 'test')
 
-    def _calculate_reward(self, action):
-        """
-        计算奖励值
-        Args:
-            action: 动作值
-        Returns:
-            reward: 奖励值
-        """
-        # 充电奖励
-        charge_reward = 0
-        if action == 1:  # 充电
-            charge_reward = 1.0
+    def reset(self, trace_idx=None, pro_trace=None):
+        self.SOC = 0.5
+        self.T = 0
         
-        # 存储成本
-        storage_cost = -0.1 * self.SOC
+        if self.mode == 'test':
+            self.RTP = load_RTP(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+            self.weather = load_weather(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
+        elif self.mode == 'validation':
+            self.RTP = load_RTP(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
+            self.weather = load_weather(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
+        else:
+            self.RTP = load_RTP(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
+            self.weather = load_weather(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
         
-        # 电力成本
-        power_cost = -0.2 * self.RTP[self.current_step % self.n_RTP]
+        self.traffic = load_traffic(config=self.config)
+        self.charge = load_charge(config=self.config)
         
-        # 总奖励
-        reward = charge_reward + storage_cost + power_cost
+        if self.mode == 'test' and trace_idx is not None:
+            self.current_pro_trace = self.pro_traces[trace_idx]["pro_trace"]
+        elif self.mode == 'validation' and pro_trace is not None:
+            self.current_pro_trace = pro_trace
+        else:
+            self.current_pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
         
-        return reward
+        return self._get_state()
 
-    def step(self, action):
-        """
-        执行一步环境交互
-        Args:
-            action: 动作值
-        Returns:
-            next_state: 下一个状态
-            reward: 奖励值
-            done: 是否结束
-        """
-        # 将连续动作转换为离散动作
-        action = np.clip(action, -1, 1)
-        discrete_action = int((action + 1) * (self.n_actions - 1) / 2)
+    def evaluate_on_fixed_pro_traces(self, agent, fixed_pro_traces):
+        agent.policy.eval()
+        total_rewards = []
         
-        # 更新SOC
-        if discrete_action == 1:  # 充电
-            self.SOC = min(self.SOC + self.charge_power, self.SOC_max)
-        elif discrete_action == 2:  # 放电
-            self.SOC = max(self.SOC - self.discharge_power, self.SOC_min)
-        
-        # 计算奖励
-        reward = self._calculate_reward(discrete_action)
-        
-        # 更新时间和状态
-        self.current_step += 1
-        done = self.current_step >= self.max_steps
-        
-        # 获取新状态
-        next_state = self._get_state()
-        
-        return next_state, reward, done
-
-    def train(self):
-        logging.info("Starting SAC training...")
-        step = 0
-        best_reward = float('-inf')
-        
-        while step < self.training_steps:
-            state = self.reset()
-            episode_reward = 0
+        for idx, pro_trace in enumerate(fixed_pro_traces):
+            self.set_mode('validation')
+            state = self.reset(trace_idx=None, pro_trace=pro_trace)
             done = False
+            episode_reward = 0
             
             while not done:
-                action = self.agent.choose_action(state)
+                action, _, _ = agent.choose_action(state, evaluate=True)
                 next_state, reward, done = self.step(action)
-                self.agent.remember(state, action, reward, next_state, done)
-                state = next_state
                 episode_reward += reward
-                step += 1
-
-                if step % self.eval_interval == 0:
-                    eval_reward = self.evaluate()
-                    if eval_reward > best_reward:
-                        best_reward = eval_reward
-                        self.agent.save_models()
-                        logging.info(f"New best model saved with reward: {best_reward:.2f}")
-
-            logging.info(f"Episode reward: {episode_reward:.2f}")
-
-    def evaluate(self, num_episodes=5):
-        total_reward = 0
-        for _ in range(num_episodes):
-            state = self.reset()
-            episode_reward = 0
-            done = False
-            while not done:
-                action = self.agent.choose_action(state)
-                next_state, reward, done = self.step(action)
                 state = next_state
-                episode_reward += reward
-            total_reward += episode_reward
-        return total_reward / num_episodes
-
-    def collect_trajectories(self, num_episodes):
-        logging.info(f"Starting trajectory collection for {num_episodes} episodes")
+                
+            total_rewards.append(episode_reward)
         
-        # 加载训练好的模型
-        try:
-            self.agent.load_models()
-            logging.info("Successfully loaded SAC models")
-        except Exception as e:
-            logging.error(f"Failed to load SAC models: {str(e)}")
-            raise
+        self.set_mode('train')
+        avg_reward = np.mean(total_rewards)
+        return avg_reward
 
+    def collect_optimal_trajectories(self, agent, filename='../Trajectories/optimal_trajectories_sac.pkl'):
+        logging.info("Starting optimal trajectory collection")
+        agent.load_models_best()
+        agent.policy.eval()
+        
+        self.set_mode('test')
+        
         trajectories = []
-        for episode in range(num_episodes):
-            logging.info(f"Collecting trajectory for episode {episode + 1}/{num_episodes}")
-            
+        trace_stats = []
+
+        for trace_idx in range(len(self.pro_traces)):
+            logging.info(f"Collecting trajectory for test trace {trace_idx}/{len(self.pro_traces)-1}")
             trajectory = {
                 'states': [],
                 'actions': [],
                 'rewards': [],
                 'rtgs': [],
-                'dones': []
+                'dones': [],
+                'trace_idx': trace_idx
             }
             
-            state = self.reset()
+            state = self.reset(trace_idx=trace_idx)
             done = False
             episode_rewards = []
+            soc_values = []
+            action_counts = {0: 0, 1: 0, 2: 0}
             
             while not done:
-                action = self.agent.choose_action(state)
+                action, _, _ = agent.choose_action(state, evaluate=True)
                 next_state, reward, done = self.step(action)
-                
-                # 记录轨迹
                 trajectory['states'].append(np.array(state, dtype=np.float32))
-                trajectory['actions'].append(np.array(action, dtype=np.float32))
+                trajectory['actions'].append(np.array(action, dtype=np.int32))
                 trajectory['rewards'].append(np.array(reward, dtype=np.float32))
                 trajectory['dones'].append(np.array(done, dtype=bool))
                 episode_rewards.append(reward)
-                
+                soc_values.append(self.SOC)
+                action_counts[action] += 1
                 state = next_state
             
-            # 计算回报到目标（RTG）
             rtgs = []
             cumulative_reward = 0
             for r in reversed(episode_rewards):
-                cumulative_reward = r + 0.99 * cumulative_reward
+                cumulative_reward = r + self.gamma * cumulative_reward
                 rtgs.insert(0, cumulative_reward)
             trajectory['rtgs'] = rtgs
             
             trajectories.append(trajectory)
-            total_reward = sum(episode_rewards)
-            logging.info(f"Episode {episode + 1} completed with total reward: {total_reward:.2f}")
+            trace_stats.append({
+                'trace_idx': trace_idx,
+                'total_reward': sum(episode_rewards),
+                'mean_soc': np.mean(soc_values),
+                'std_soc': np.std(soc_values),
+                'action_counts': action_counts
+            })
+            
+            logging.info(f"Trace {trace_idx}: Total reward: {sum(episode_rewards):.2f}")
+            logging.info(f"Trace {trace_idx}: Mean SOC: {np.mean(soc_values):.3f}, Std SOC: {np.std(soc_values):.3f}")
+            logging.info(f"Trace {trace_idx}: Action distribution: {action_counts}")
         
         self.trajectories = trajectories
         
-        # 记录轨迹统计信息
-        total_rewards = [sum(t['rewards']) for t in trajectories]
-        stats = {
-            'mean_reward': np.mean(total_rewards),
-            'std_reward': np.std(total_rewards),
-            'min_reward': np.min(total_rewards),
-            'max_reward': np.max(total_rewards),
-            'num_trajectories': len(trajectories)
-        }
-        logging.info(f"Trajectory collection completed. Statistics: {stats}")
-        
-        return trajectories 
+        try:
+            os.makedirs(os.path.dirname(filename), exist_ok=True)
+            with open(filename, 'wb') as f:
+                pickle.dump(trajectories, f)
+            logging.info(f"Optimal trajectories saved to {filename}")
+        except Exception as e:
+            logging.error(f"Error saving optimal trajectories: {str(e)}")
+            raise
+            
+        return trajectories
+
+def plot_learning_curve(x, scores, figure_file):
+    running_avg = np.zeros(len(scores))
+    for i in range(len(running_avg)):
+        running_avg[i] = np.mean(scores[max(0, i-100):(i+1)])
+    plt.figure(figsize=(8, 6))
+    plt.plot(x, running_avg)
+    plt.title('Running Average of Previous 100 Validation Scores')
+    plt.xlabel('Episode')
+    plt.ylabel('Average Reward')
+    plt.grid(True)
+    plt.savefig(figure_file)
+    plt.close()
 
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-    import os
-    from tqdm import tqdm
-    os.makedirs("figure", exist_ok=True)
-    
-    env = BS_EV_SAC()
-    n_episodes = 50  # 可根据需要调整
-    score_history = []
-    best_score = float('-inf')
-    avg_scores = []
-    window = 10  # 平滑窗口
+    # 设置随机种子
+    seed = 42
+    np.random.seed(seed)
+    T.manual_seed(seed)
+    T.cuda.manual_seed(seed)
+    T.cuda.manual_seed_all(seed)
+    random.seed(seed)
 
-    for i in tqdm(range(n_episodes)):
-        state = env.reset()
+    # 初始化环境（训练模式）
+    env = BS_EV_SAC(train_flag=True)
+    n_fixed_pro_traces = 100
+    n_games = 50
+    batch_size = 64
+    alpha = 0.0003
+    N = 20
+
+    # 生成固定验证pro trace
+    fixed_pro_traces = []
+    for _ in range(n_fixed_pro_traces):
+        pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
+        fixed_pro_traces.append(pro_trace)
+    logging.info(f"Generated {len(fixed_pro_traces)} fixed pro traces for validation")
+
+    # 初始化SAC代理
+    agent = Agent(
+        n_actions=env.n_actions,
+        input_dims=env.n_states,
+        gamma=0.99,
+        alpha=alpha,
+        tau=0.005,
+        batch_size=batch_size,
+        target_entropy=-np.log(1.0 / env.n_actions) * 0.98
+    )
+
+    # 训练SAC模型
+    best_score = float('-inf')
+    score_history = []
+    n_steps = 0
+    learn_iters = 0
+    figure_file = 'Figure/learning_curve_sac.png'
+
+    for i in tqdm(range(n_games), desc="Training SAC"):
+        observation = env.reset()
         done = False
         score = 0
+        agent.policy.train()
+        
         while not done:
-            action = env.agent.choose_action(state)
-            next_state, reward, done = env.step(action)
-            env.agent.remember(state, action, reward, next_state, done)
-            state = next_state
+            action, action_tensor, log_prob = agent.choose_action(observation)
+            observation_, reward, done = env.step(action)
+            n_steps += 1
             score += reward
-        score_history.append(score)
-        avg_score = np.mean(score_history[-window:])
-        avg_scores.append(avg_score)
+            agent.memory.store_transition(observation, action, reward, observation_, done)
+            if n_steps >= batch_size:
+                for _ in range(N):
+                    agent.learn()
+                learn_iters += 1
+            observation = observation_
+        
+        avg_score = env.evaluate_on_fixed_pro_traces(agent, fixed_pro_traces)
+        score_history.append(avg_score)
+        
         if avg_score > best_score:
             best_score = avg_score
-            env.agent.save_models()
-        print(f"episode {i} score {score:.1f} avg score {avg_score:.1f}")
+            agent.save_models_best()
+        
+        logging.info(f"Episode {i}: Train score {score:.1f}, Avg validation score {avg_score:.1f}, "
+                     f"Time steps {n_steps}, Learning steps {learn_iters}")
+    
+    agent.save_models_last()
+    logging.info(f"Training completed. Best validation score: {best_score:.1f}")
 
-    # 保存学习曲线
-    plt.figure()
-    plt.plot(range(1, n_episodes+1), avg_scores)
-    plt.xlabel('Episode')
-    plt.ylabel(f'Average Score (window={window})')
-    plt.title('SAC Running Average Score')
-    plt.grid()
-    plt.savefig('Figure/learning_curve_SAC.png')
-    print('训练完成，模型和学习曲线已保存。') 
+    # 绘制学习曲线
+    x = [i+1 for i in range(len(score_history))]
+    plot_learning_curve(x, score_history, figure_file)
+    logging.info(f"Learning curve saved to {figure_file}")
