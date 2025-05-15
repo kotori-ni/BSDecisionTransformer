@@ -76,6 +76,8 @@ class PPOMemory:
 class ActorNetwork(nn.Module):
     def __init__(self, n_actions, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
         super(ActorNetwork, self).__init__()
+        # 确保模型目录存在
+        os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'actor_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'actor_torch_ppo_last')
         self.actor = nn.Sequential(
@@ -110,6 +112,8 @@ class ActorNetwork(nn.Module):
 class CriticNetwork(nn.Module):
     def __init__(self, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
         super(CriticNetwork, self).__init__()
+        # 确保模型目录存在
+        os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'critic_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'critic_torch_ppo_last')
         self.critic = nn.Sequential(
