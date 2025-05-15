@@ -42,52 +42,16 @@
   ```bash
   python Code/BS_EV_Environment_DQN.py
   ```
-  - 模型和曲线保存在`figure/learning_curve_DQN.png`等。
 
 - **SAC训练**  
   ```bash
   python Code/BS_EV_Environment_SAC.py
   ```
-  - 模型和曲线保存在`figure/learning_curve_SAC.png`等。
 
 - **PPO训练**  
   ```bash
   python Code/BS_EV_Environment_PPO.py
   ```
-  - 模型和曲线保存在`figure/learning_curve_PPO.png`等。
-
-## 轨迹收集
-
-使用命令行脚本`CollectTrajectories.py`，可指定算法类型和episode数量，自动收集轨迹并保存到`Trajectories/`目录。
-
-```bash
-python Code/CollectTrajectories.py --model dqn --episodes 20
-python Code/CollectTrajectories.py --model dp --episodes 10
-python Code/CollectTrajectories.py --model ppo --episodes 15
-python Code/CollectTrajectories.py --model sac --episodes 10
-```
-- 轨迹文件将保存为`Trajectories/trajectories_{model}.pkl`。
-
-## Decision Transformer训练与评估
-
-使用`train.py`脚本，指定轨迹类型（dp/dqn/sac/ppo）进行DT训练，模型自动保存到`Models/`目录。
-
-```bash
-python Code/train.py --type dqn --epochs 50 --batch_size 8 --lr 5e-5
-python Code/train.py --type ppo
-```
-- 训练完成后模型保存在`Models/dt_model_{type}.pth`。
-- 评估时会优先加载`Models/dt_model_best_{type}.pth`（如有），否则加载刚刚训练的模型，并输出评估统计。
-
-## 流程
-
-1. **训练RL模型**（任选DQN/SAC/PPO）
-2. **收集轨迹**  
-   `python Code/CollectTrajectories.py --model dqn --episodes 20`
-3. **训练Decision Transformer**  
-   `python Code/train.py --type dqn`
-4. **查看模型与评估结果**  
-   - 模型在`Models/`，评估结果在终端输出
 
 ## 依赖环境
 
