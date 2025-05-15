@@ -461,22 +461,12 @@ def plot_learning_curve(x, train_scores, val_scores, figure_file):
     # 确保Figure目录存在
     os.makedirs(os.path.dirname(figure_file), exist_ok=True)
     
-    # 计算验证分数的运行平均值
-    running_avg_val = np.zeros(len(val_scores))
-    for i in range(len(running_avg_val)):
-        running_avg_val[i] = np.mean(val_scores[max(0, i-100):(i+1)])
-    
-    # 计算训练分数的运行平均值
-    running_avg_train = np.zeros(len(train_scores))
-    for i in range(len(running_avg_train)):
-        running_avg_train[i] = np.mean(train_scores[max(0, i-100):(i+1)])
-    
     plt.figure(figsize=(10, 6))
-    plt.plot(x, running_avg_train, 'b-', label='Training Score (100-episode avg)')
-    plt.plot(x, running_avg_val, 'r-', label='Validation Score (100-episode avg)')
+    plt.plot(x, train_scores, 'b-', label='Training Score')
+    plt.plot(x, val_scores, 'r-', label='Validation Score')
     plt.title('Learning Curves')
     plt.xlabel('Episode')
-    plt.ylabel('Average Reward')
+    plt.ylabel('Reward')
     plt.legend()
     plt.grid(True)
     plt.savefig(figure_file)
