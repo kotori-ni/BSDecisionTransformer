@@ -245,12 +245,12 @@ class Agent:
                 action = T.softmax(mu, dim=-1)
                 action_idx = T.argmax(action, dim=-1).item()
             self.policy.train()
-            return action_idx, None, None
+            return action_idx
         else:
             action, log_prob = self.policy.sample(state)
             action_idx = T.argmax(action, dim=-1).item()
             log_prob = log_prob.item()
-            return action_idx, action, log_prob
+            return action_idx
 
     def learn(self):
         if self.memory.mem_cntr < self.batch_size:
@@ -374,7 +374,7 @@ class BS_EV_SAC(BS_EV_Base):
             episode_reward = 0
             
             while not done:
-                action, _, _ = agent.choose_action(state, evaluate=True)
+                action = agent.choose_action(state, evaluate=True)
                 next_state, reward, done = self.step(action)
                 episode_reward += reward
                 state = next_state
@@ -413,7 +413,7 @@ class BS_EV_SAC(BS_EV_Base):
             action_counts = {0: 0, 1: 0, 2: 0}
             
             while not done:
-                action, _, _ = agent.choose_action(state, evaluate=True)
+                action = agent.choose_action(state, evaluate=True)
                 next_state, reward, done = self.step(action)
                 trajectory['states'].append(np.array(state, dtype=np.float32))
                 trajectory['actions'].append(np.array(action, dtype=np.int32))
@@ -464,7 +464,7 @@ def plot_learning_curve(x, train_scores, val_scores, figure_file):
     plt.figure(figsize=(10, 6))
     plt.plot(x, train_scores, 'b-', label='Training Score')
     plt.plot(x, val_scores, 'r-', label='Validation Score')
-    plt.title('Learning Curves')
+    plt.title('SAC Learning Curves')
     plt.xlabel('Episode')
     plt.ylabel('Reward')
     plt.legend()
@@ -530,7 +530,7 @@ if __name__ == "__main__":
     val_score_history = []    # 重命名：验证分数
     n_steps = 0
     learn_iters = 0
-    figure_file = 'Figure/learning_curve_sac.png'
+    figure_file = '../Figure/learning_curve_sac.png'
 
     for i in tqdm(range(n_games), desc="Training SAC"):
         # 训练阶段：使用随机生成的pro trace
@@ -544,7 +544,7 @@ if __name__ == "__main__":
         agent.policy.train()
         
         while not done:
-            action = agent.choose_action(observation)
+            action = agent.choose_action(observation)  # 现在只返回action_idx
             observation_, reward, done = env.step(action)
             n_steps += 1
             score += reward

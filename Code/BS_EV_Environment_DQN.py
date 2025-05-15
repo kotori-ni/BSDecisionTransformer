@@ -315,7 +315,7 @@ def plot_learning_curve(x, train_scores, val_scores, figure_file):
     plt.figure(figsize=(10, 6))
     plt.plot(x, train_scores, 'b-', label='Training Score')
     plt.plot(x, val_scores, 'r-', label='Validation Score')
-    plt.title('Learning Curves')
+    plt.title('DQN Learning Curves')
     plt.xlabel('Episode')
     plt.ylabel('Reward')
     plt.legend()
@@ -382,7 +382,7 @@ if __name__ == "__main__":
     val_score_history = []    # 重命名：验证分数
     n_steps = 0
     learn_iters = 0
-    figure_file = 'Figure/learning_curve_dqn.png'
+    figure_file = '../Figure/learning_curve_dqn.png'
 
     for i in tqdm(range(n_games), desc="Training DQN"):
         # 训练阶段：使用随机生成的pro trace
