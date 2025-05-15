@@ -250,8 +250,8 @@ class BS_EV_PPO(BS_EV_Base):
             self.weather = load_weather(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
         elif self.mode == 'validation':
             # 验证模式：使用训练集数据
-            self.RTP = load_RTP(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
-            self.weather = load_weather(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
+            self.RTP = load_RTP(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
+            self.weather = load_weather(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
         else:  # train mode
             # 训练模式：使用训练集数据
             self.RTP = load_RTP(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
@@ -402,7 +402,7 @@ if __name__ == "__main__":
     env = BS_EV_PPO(train_flag=True)
     n_fixed_pro_traces = 100  # 固定验证pro trace数量
     n_games = 50  # 训练episode数量
-    batch_size = 16
+    batch_size = 4
     n_epochs = 4
     alpha = 0.0001
     N = 20  # 每N步学习一次

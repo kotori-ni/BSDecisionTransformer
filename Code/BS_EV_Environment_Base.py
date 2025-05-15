@@ -149,16 +149,7 @@ class BS_EV_Base:
         self.n_weather = n_weather
         self.trace_idx = trace_idx
         self.mode = 'train'  # 新增：用于区分训练/验证/测试模式
-        
-        try:
-            pro_traces_file = self.config['data']['pro_traces_file']
-            check_file_exists(pro_traces_file)
-            with open(pro_traces_file, 'rb') as f:
-                self.pro_traces = pickle.load(f)
-            logging.info(f"成功加载第{self.trace_idx}条 pro 序列")
-        except Exception as e:
-            logging.error(f"加载 pro 序列失败: {str(e)}")
-            raise
+        self.pro_traces = None  # 初始化为None
         
         # 环境参数
         self.min_SOC = self.config['environment']['min_SOC']
@@ -174,6 +165,18 @@ class BS_EV_Base:
         """设置环境模式：'train', 'validation', 或 'test'"""
         assert mode in ['train', 'validation', 'test'], f"Invalid mode: {mode}"
         self.mode = mode
+        
+        # 只在测试模式下加载pro序列
+        if mode == 'test' and self.pro_traces is None:
+            try:
+                pro_traces_file = self.config['data']['pro_traces_file']
+                check_file_exists(pro_traces_file)
+                with open(pro_traces_file, 'rb') as f:
+                    self.pro_traces = pickle.load(f)
+                logging.info(f"成功加载第{self.trace_idx}条 pro 序列")
+            except Exception as e:
+                logging.error(f"加载 pro 序列失败: {str(e)}")
+                raise
 
     def reset(self, trace_idx=None, pro_trace=None):
         """
