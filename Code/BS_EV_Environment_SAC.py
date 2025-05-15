@@ -14,7 +14,8 @@ from BS_EV_Environment_Base import (
     load_RTP,
     load_weather,
     load_traffic,
-    load_charge
+    load_charge,
+    load_config
 )
 
 # 设置日志
@@ -470,6 +471,20 @@ def plot_learning_curve(x, scores, figure_file):
     plt.close()
 
 if __name__ == "__main__":
+    # 初始化必要的目录
+    directories = [
+        '../Log',
+        '../Models',
+        '../Trajectories',
+        '../Figure'
+    ]
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except Exception as e:
+            logging.error(f"创建目录失败 {directory}: {str(e)}")
+            raise
+
     # 设置随机种子
     seed = 42
     np.random.seed(seed)
@@ -478,15 +493,19 @@ if __name__ == "__main__":
     T.cuda.manual_seed_all(seed)
     random.seed(seed)
 
+    # 加载配置
+    config = load_config()
+    sac_config = config['sac']
+
     # 初始化环境（训练模式）
     env = BS_EV_SAC(train_flag=True)
-    n_fixed_pro_traces = 100
-    n_games = 50
-    batch_size = 64
-    alpha = 0.0003
-    N = 20
+    n_fixed_pro_traces = sac_config['n_fixed_pro_traces']  # 固定验证pro trace数量
+    n_games = sac_config['n_games']  # 训练episode数量
+    batch_size = sac_config['batch_size']
+    alpha = sac_config['alpha']
+    N = sac_config['learn_interval']  # 每N步学习一次
 
-    # 生成固定验证pro trace
+    # 生成固定验证pro trace（独立于测试集）
     fixed_pro_traces = []
     for _ in range(n_fixed_pro_traces):
         pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
@@ -494,15 +513,14 @@ if __name__ == "__main__":
     logging.info(f"Generated {len(fixed_pro_traces)} fixed pro traces for validation")
 
     # 初始化SAC代理
-    agent = Agent(
-        n_actions=env.n_actions,
-        input_dims=env.n_states,
-        gamma=0.99,
-        alpha=alpha,
-        tau=0.005,
-        batch_size=batch_size,
-        target_entropy=-np.log(1.0 / env.n_actions) * 0.98
-    )
+    agent = Agent(n_actions=env.n_actions,
+                 input_dims=env.n_states,
+                 gamma=sac_config['gamma'],
+                 alpha=alpha,
+                 tau=sac_config['tau'],
+                 batch_size=batch_size,
+                 reward_scale=sac_config['reward_scale'],
+                 buffer_size=sac_config['mem_size'])
 
     # 训练SAC模型
     best_score = float('-inf')
@@ -512,23 +530,28 @@ if __name__ == "__main__":
     figure_file = 'Figure/learning_curve_sac.png'
 
     for i in tqdm(range(n_games), desc="Training SAC"):
-        observation = env.reset()
+        # 训练阶段：使用随机生成的pro trace
+        observation = env.reset()  # 不传trace_idx和pro_trace，将随机生成
         done = False
         score = 0
+        agent.value.train()
+        agent.target_value.train()
+        agent.q1.train()
+        agent.q2.train()
         agent.policy.train()
         
         while not done:
-            action, action_tensor, log_prob = agent.choose_action(observation)
+            action = agent.choose_action(observation)
             observation_, reward, done = env.step(action)
             n_steps += 1
             score += reward
             agent.memory.store_transition(observation, action, reward, observation_, done)
-            if n_steps >= batch_size:
-                for _ in range(N):
-                    agent.learn()
+            if n_steps % N == 0:
+                agent.learn()
                 learn_iters += 1
             observation = observation_
         
+        # 验证阶段：使用固定的pro trace
         avg_score = env.evaluate_on_fixed_pro_traces(agent, fixed_pro_traces)
         score_history.append(avg_score)
         

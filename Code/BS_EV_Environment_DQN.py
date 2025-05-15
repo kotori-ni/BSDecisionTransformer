@@ -14,7 +14,8 @@ from BS_EV_Environment_Base import (
     load_RTP,
     load_weather,
     load_traffic,
-    load_charge
+    load_charge,
+    load_config
 )
 
 # 设置日志
@@ -321,6 +322,20 @@ def plot_learning_curve(x, scores, figure_file):
     plt.close()
 
 if __name__ == "__main__":
+    # 初始化必要的目录
+    directories = [
+        '../Log',
+        '../Models',
+        '../Trajectories',
+        '../Figure'
+    ]
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except Exception as e:
+            logging.error(f"创建目录失败 {directory}: {str(e)}")
+            raise
+
     # 设置随机种子
     seed = 42
     np.random.seed(seed)
@@ -329,15 +344,19 @@ if __name__ == "__main__":
     T.cuda.manual_seed_all(seed)
     random.seed(seed)
 
+    # 加载配置
+    config = load_config()
+    dqn_config = config['dqn']
+
     # 初始化环境（训练模式）
     env = BS_EV_DQN(train_flag=True)
-    n_fixed_pro_traces = 100
-    n_games = 50
-    batch_size = 64
-    alpha = 0.0003
-    N = 20
+    n_fixed_pro_traces = dqn_config['n_fixed_pro_traces']  # 固定验证pro trace数量
+    n_games = dqn_config['n_games']  # 训练episode数量
+    batch_size = dqn_config['batch_size']
+    alpha = dqn_config['alpha']
+    N = dqn_config['learn_interval']  # 每N步学习一次
 
-    # 生成固定验证pro trace
+    # 生成固定验证pro trace（独立于测试集）
     fixed_pro_traces = []
     for _ in range(n_fixed_pro_traces):
         pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
@@ -345,18 +364,15 @@ if __name__ == "__main__":
     logging.info(f"Generated {len(fixed_pro_traces)} fixed pro traces for validation")
 
     # 初始化DQN代理
-    agent = Agent(
-        n_actions=env.n_actions,
-        input_dims=env.n_states,
-        gamma=0.99,
-        alpha=alpha,
-        epsilon=1.0,
-        eps_min=0.01,
-        eps_dec=5e-6,
-        batch_size=batch_size,
-        buffer_size=1000000,
-        target_update=100
-    )
+    agent = Agent(n_actions=env.n_actions,
+                 input_dims=env.n_states,
+                 gamma=dqn_config['gamma'],
+                 alpha=alpha,
+                 epsilon=dqn_config['epsilon'],
+                 eps_min=dqn_config['epsilon_min'],
+                 eps_dec=dqn_config['epsilon_dec'],
+                 batch_size=batch_size,
+                 buffer_size=dqn_config['mem_size'])
 
     # 训练DQN模型
     best_score = float('-inf')
@@ -366,10 +382,12 @@ if __name__ == "__main__":
     figure_file = 'Figure/learning_curve_dqn.png'
 
     for i in tqdm(range(n_games), desc="Training DQN"):
-        observation = env.reset()
+        # 训练阶段：使用随机生成的pro trace
+        observation = env.reset()  # 不传trace_idx和pro_trace，将随机生成
         done = False
         score = 0
         agent.q_eval.train()
+        agent.q_target.train()
         
         while not done:
             action = agent.choose_action(observation)
@@ -377,12 +395,12 @@ if __name__ == "__main__":
             n_steps += 1
             score += reward
             agent.store_transition(observation, action, reward, observation_, done)
-            if n_steps >= batch_size:
-                for _ in range(N):
-                    agent.learn()
+            if n_steps % N == 0:
+                agent.learn()
                 learn_iters += 1
             observation = observation_
         
+        # 验证阶段：使用固定的pro trace
         avg_score = env.evaluate_on_fixed_pro_traces(agent, fixed_pro_traces)
         score_history.append(avg_score)
         
@@ -391,7 +409,7 @@ if __name__ == "__main__":
             agent.save_models_best()
         
         logging.info(f"Episode {i}: Train score {score:.1f}, Avg validation score {avg_score:.1f}, "
-                     f"Time steps {n_steps}, Learning steps {learn_iters}, Epsilon {agent.epsilon:.3f}")
+                     f"Time steps {n_steps}, Learning steps {learn_iters}")
     
     agent.save_models_last()
     logging.info(f"Training completed. Best validation score: {best_score:.1f}")

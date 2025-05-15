@@ -14,7 +14,8 @@ from BS_EV_Environment_Base import (
     load_RTP,
     load_weather,
     load_traffic,
-    load_charge
+    load_charge,
+    load_config
 )
 
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
@@ -381,6 +382,9 @@ class BS_EV_PPO(BS_EV_Base):
         return trajectories
 
 def plot_learning_curve(x, scores, figure_file):
+    # 确保Figure目录存在
+    os.makedirs(os.path.dirname(figure_file), exist_ok=True)
+    
     running_avg = np.zeros(len(scores))
     for i in range(len(running_avg)):
         running_avg[i] = np.mean(scores[max(0, i-100):(i+1)])
@@ -394,6 +398,20 @@ def plot_learning_curve(x, scores, figure_file):
     plt.close()
 
 if __name__ == "__main__":
+    # 初始化必要的目录
+    directories = [
+        '../Log',
+        '../Models',
+        '../Trajectories',
+        '../Figure'
+    ]
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except Exception as e:
+            logging.error(f"创建目录失败 {directory}: {str(e)}")
+            raise
+
     # 设置随机种子
     seed = 42
     np.random.seed(seed)
@@ -402,14 +420,18 @@ if __name__ == "__main__":
     T.cuda.manual_seed_all(seed)
     random.seed(seed)
 
+    # 加载配置
+    config = load_config()
+    ppo_config = config['ppo']
+
     # 初始化环境（训练模式）
     env = BS_EV_PPO(train_flag=True)
-    n_fixed_pro_traces = 100  # 固定验证pro trace数量
-    n_games = 50  # 训练episode数量
-    batch_size = 4
-    n_epochs = 4
-    alpha = 0.0001
-    N = 20  # 每N步学习一次
+    n_fixed_pro_traces = ppo_config['n_fixed_pro_traces']  # 固定验证pro trace数量
+    n_games = ppo_config['n_games']  # 训练episode数量
+    batch_size = ppo_config['batch_size']
+    n_epochs = ppo_config['n_epochs']
+    alpha = ppo_config['alpha']
+    N = ppo_config['learn_interval']  # 每N步学习一次
 
     # 生成固定验证pro trace（独立于测试集）
     fixed_pro_traces = []
@@ -419,9 +441,14 @@ if __name__ == "__main__":
     logging.info(f"Generated {len(fixed_pro_traces)} fixed pro traces for validation")
 
     # 初始化PPO代理
-    agent = Agent(n_actions=env.n_actions, batch_size=batch_size, 
-                  alpha=alpha, n_epochs=n_epochs, 
-                  input_dims=env.n_states)
+    agent = Agent(n_actions=env.n_actions, 
+                 input_dims=env.n_states,
+                 gamma=ppo_config['gamma'],
+                 alpha=alpha,
+                 gae_lambda=ppo_config['gae_lambda'],
+                 policy_clip=ppo_config['policy_clip'],
+                 batch_size=batch_size,
+                 n_epochs=n_epochs)
 
     # 训练PPO模型
     best_score = float('-inf')
