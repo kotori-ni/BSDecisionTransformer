@@ -256,21 +256,21 @@ class Agent:
             return
         states, actions, rewards, states_, dones = self.sample_buffer(self.batch_size)
         states = T.tensor(states, dtype=T.float32).to(self.device)
-        actions = T.tensor(actions, dtype=T.int64).to(self.device)
+        actions = T.tensor(actions, dtype=T.long).to(self.device)
         rewards = T.tensor(rewards, dtype=T.float32).to(self.device)
         states_ = T.tensor(states_, dtype=T.float32).to(self.device)
         dones = T.tensor(dones, dtype=T.bool).to(self.device)
 
+        # Compute value and target value
         value = self.value(states).view(-1)
         value_ = self.target_value(states_).view(-1)
         value_[dones] = 0.0
 
+        # Compute Q values for current actions
         actions_one_hot = T.zeros(self.batch_size, self.n_actions, device=self.device)
         actions_one_hot.scatter_(1, actions.unsqueeze(1), 1.0)
 
-        q1 = self.q1(states, actions_one_hot).view(-1)
-        q2 = self.q2(states, actions_one_hot).view(-1)
-
+        # Compute target for Q losses
         with T.no_grad():
             actions_next, log_probs_next = self.policy.sample(states_)
             q1_next = self.q1(states_, actions_next).view(-1)
@@ -278,22 +278,33 @@ class Agent:
             q_next = T.min(q1_next, q2_next)
             target = rewards + self.gamma * (value_ - T.exp(self.log_alpha) * log_probs_next.view(-1))
 
-        value_loss = ((value - T.min(q1, q2) + T.exp(self.log_alpha) * log_probs_next.view(-1)) ** 2).mean()
-        q1_loss = ((q1 - target.detach()) ** 2).mean()
-        q2_loss = ((q2 - target.detach()) ** 2).mean()
+        # Value loss: recompute q1, q2, and log_probs_pi to ensure gradients
+        q1 = self.q1(states, actions_one_hot).view(-1)
+        q2 = self.q2(states, actions_one_hot).view(-1)
+        actions_pi, log_probs_pi = self.policy.sample(states)  # Recompute for value_loss
+        value_loss = ((value - T.min(q1, q2) + T.exp(self.log_alpha) * log_probs_pi.view(-1)) ** 2).mean()
 
         self.value.optimizer.zero_grad()
         value_loss.backward()
         self.value.optimizer.step()
 
+        # Q1 loss: recompute q1
+        q1 = self.q1(states, actions_one_hot).view(-1)
+        q1_loss = ((q1 - target.detach()) ** 2).mean()
+
         self.q1.optimizer.zero_grad()
         q1_loss.backward()
         self.q1.optimizer.step()
+
+        # Q2 loss: recompute q2
+        q2 = self.q2(states, actions_one_hot).view(-1)
+        q2_loss = ((q2 - target.detach()) ** 2).mean()
 
         self.q2.optimizer.zero_grad()
         q2_loss.backward()
         self.q2.optimizer.step()
 
+        # Policy loss
         actions_pi, log_probs_pi = self.policy.sample(states)
         q1_pi = self.q1(states, actions_pi).view(-1)
         q2_pi = self.q2(states, actions_pi).view(-1)
@@ -304,6 +315,7 @@ class Agent:
         policy_loss.backward()
         self.policy.optimizer.step()
 
+        # Alpha loss
         alpha_loss = -(self.log_alpha * (log_probs_pi.view(-1) + self.target_entropy).detach()).mean()
 
         self.alpha_optimizer.zero_grad()
