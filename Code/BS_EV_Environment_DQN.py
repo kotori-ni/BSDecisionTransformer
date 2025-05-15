@@ -308,15 +308,27 @@ class BS_EV_DQN(BS_EV_Base):
             
         return trajectories
 
-def plot_learning_curve(x, scores, figure_file):
-    running_avg = np.zeros(len(scores))
-    for i in range(len(running_avg)):
-        running_avg[i] = np.mean(scores[max(0, i-100):(i+1)])
-    plt.figure(figsize=(8, 6))
-    plt.plot(x, running_avg)
-    plt.title('Running Average of Previous 100 Validation Scores')
+def plot_learning_curve(x, train_scores, val_scores, figure_file):
+    # 确保Figure目录存在
+    os.makedirs(os.path.dirname(figure_file), exist_ok=True)
+    
+    # 计算验证分数的运行平均值
+    running_avg_val = np.zeros(len(val_scores))
+    for i in range(len(running_avg_val)):
+        running_avg_val[i] = np.mean(val_scores[max(0, i-100):(i+1)])
+    
+    # 计算训练分数的运行平均值
+    running_avg_train = np.zeros(len(train_scores))
+    for i in range(len(running_avg_train)):
+        running_avg_train[i] = np.mean(train_scores[max(0, i-100):(i+1)])
+    
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, running_avg_train, 'b-', label='Training Score (100-episode avg)')
+    plt.plot(x, running_avg_val, 'r-', label='Validation Score (100-episode avg)')
+    plt.title('Learning Curves')
     plt.xlabel('Episode')
     plt.ylabel('Average Reward')
+    plt.legend()
     plt.grid(True)
     plt.savefig(figure_file)
     plt.close()
@@ -376,7 +388,8 @@ if __name__ == "__main__":
 
     # 训练DQN模型
     best_score = float('-inf')
-    score_history = []
+    train_score_history = []  # 新增：记录训练分数
+    val_score_history = []    # 重命名：验证分数
     n_steps = 0
     learn_iters = 0
     figure_file = 'Figure/learning_curve_dqn.png'
@@ -400,9 +413,11 @@ if __name__ == "__main__":
                 learn_iters += 1
             observation = observation_
         
+        train_score_history.append(score)  # 新增：记录训练分数
+        
         # 验证阶段：使用固定的pro trace
         avg_score = env.evaluate_on_fixed_pro_traces(agent, fixed_pro_traces)
-        score_history.append(avg_score)
+        val_score_history.append(avg_score)  # 重命名：验证分数
         
         if avg_score > best_score:
             best_score = avg_score
@@ -415,6 +430,6 @@ if __name__ == "__main__":
     logging.info(f"Training completed. Best validation score: {best_score:.1f}")
 
     # 绘制学习曲线
-    x = [i+1 for i in range(len(score_history))]
-    plot_learning_curve(x, score_history, figure_file)
+    x = [i+1 for i in range(len(val_score_history))]
+    plot_learning_curve(x, train_score_history, val_score_history, figure_file)
     logging.info(f"Learning curve saved to {figure_file}")

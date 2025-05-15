@@ -47,11 +47,14 @@ def plot_training_curves(log_files, algorithm_names=None):
         plt.plot(episodes, train_running_avg, '--', label=f'{name} Train', alpha=0.7)
         plt.plot(episodes, val_running_avg, '-', label=f'{name} Validation', alpha=0.7)
     
-    plt.title('Training and Validation Scores')
+    plt.title('Training and Validation Scores\n(Points: Raw Scores, Lines: 10-Episode Running Average)')
     plt.xlabel('Episode')
     plt.ylabel('Score')
     plt.grid(True)
-    plt.legend()
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    
+    # 调整图形大小以适应图例
+    plt.tight_layout()
     
     # 确保Figure目录存在
     os.makedirs('../Figure', exist_ok=True)
@@ -60,7 +63,7 @@ def plot_training_curves(log_files, algorithm_names=None):
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     figure_file = f'../Figure/training_curves_{timestamp}.png'
     
-    plt.savefig(figure_file)
+    plt.savefig(figure_file, bbox_inches='tight', dpi=300)
     plt.close()
     
     print(f"训练曲线已保存到: {figure_file}")
