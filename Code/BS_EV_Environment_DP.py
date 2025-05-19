@@ -2,6 +2,7 @@ import numpy as np
 import pickle
 import os
 import logging
+import matplotlib.pyplot as plt
 from BS_EV_Environment_Base import BS_EV_Base, load_RTP, load_weather, load_traffic, load_charge
 
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
@@ -153,6 +154,10 @@ class BS_EV_DP(BS_EV_Base):
         # 确保在测试模式下运行
         self.set_mode('test')
         
+        # 创建图形保存目录
+        figure_dir = os.path.join(os.path.dirname(__file__), '..', 'Figure')
+        os.makedirs(figure_dir, exist_ok=True)
+        
         for trace_idx in range(len(self.pro_traces)):
             logging.info(f"Collecting trajectory for trace {trace_idx}/{len(self.pro_traces)-1}")
             
@@ -250,6 +255,35 @@ class BS_EV_DP(BS_EV_Base):
             }
         }
         logging.info(f"Trajectory collection completed. Statistics: {stats}")
+        
+        # 创建reward分布图
+        plt.figure(figsize=(12, 6))
+        
+        # 计算bin的边界（以1000为单位）
+        min_reward = np.min(total_rewards)
+        max_reward = np.max(total_rewards)
+        bin_start = np.floor(min_reward / 1000) * 1000
+        bin_end = np.ceil(max_reward / 1000) * 1000
+        bins = np.arange(bin_start, bin_end + 1000, 1000)
+        
+        # 绘制柱状图
+        plt.hist(total_rewards, bins=bins, edgecolor='black', alpha=0.7)
+        
+        # 添加统计信息
+        plt.axvline(stats['mean_reward'], color='red', linestyle='--', label=f'Mean: {stats["mean_reward"]:.2f}')
+        plt.axvline(stats['mean_reward'] + stats['std_reward'], color='green', linestyle=':', label=f'Mean+Std: {stats["mean_reward"] + stats["std_reward"]:.2f}')
+        plt.axvline(stats['mean_reward'] - stats['std_reward'], color='green', linestyle=':', label=f'Mean-Std: {stats["mean_reward"] - stats["std_reward"]:.2f}')
+        
+        # 设置图形属性
+        plt.title('Distribution of Total Rewards')
+        plt.xlabel('Total Reward')
+        plt.ylabel('Number of Traces')
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        
+        # 保存图形
+        plt.savefig(os.path.join(figure_dir, 'dp_reward_distribution.png'), dpi=300, bbox_inches='tight')
+        plt.close()
         
         return trajectories
 

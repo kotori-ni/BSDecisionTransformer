@@ -1,7 +1,10 @@
 .vscode/
+Data/
+*.pkl/
 Trajectories/
 Models/
 Log/
 tmp/
 Code/__pycache__/
 Figure/
+
