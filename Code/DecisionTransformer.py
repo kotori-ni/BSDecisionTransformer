@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
+from torch.nn.utils import clip_grad_norm_
 import os
 
 class DecisionTransformer(nn.Module):
@@ -138,7 +139,9 @@ def evaluate_on_trajectory(model, traj, target_rtg, device):
     total_reward = 0
     t = 0
     
-    states = torch.zeros((1, model.max_len, model.state_dim), dtype=torch.float32, device=device)
+    # 使用模型的状态维度
+    state_dim = model.state_dim
+    states = torch.zeros((1, model.max_len, state_dim), dtype=torch.float32, device=device)
     actions = torch.zeros((1, model.max_len), dtype=torch.long, device=device)
     rtgs = torch.full((1, model.max_len), fill_value=target_rtg, dtype=torch.float32, device=device)
     timesteps = torch.zeros((1, model.max_len), dtype=torch.long, device=device)
@@ -161,7 +164,7 @@ def evaluate_on_trajectory(model, traj, target_rtg, device):
         t += 1
         
         if t >= model.max_len:
-            states = torch.cat((states[:, 1:], torch.zeros((1, 1, model.state_dim), device=device)), dim=1)
+            states = torch.cat((states[:, 1:], torch.zeros((1, 1, state_dim), device=device)), dim=1)
             actions = torch.cat((actions[:, 1:], torch.zeros((1, 1), dtype=torch.long, device=device)), dim=1)
             rtgs = torch.cat((rtgs[:, 1:], torch.full((1, 1), fill_value=target_rtg, device=device)), dim=1)
             timesteps = torch.cat((timesteps[:, 1:], torch.tensor([[t]], dtype=torch.long, device=device)), dim=1)
@@ -268,7 +271,15 @@ def analyze_test_trajectories(model, test_trajectories, target_rtg,
                               interval=100, device='cuda'):
     """分析测试轨迹，每interval条输出一次结果"""
     print("\n分析测试轨迹:")
+    analyzed_count = 0
+    
     for i, traj in enumerate(test_trajectories):
         if (i + 1) % interval == 0:  # 每interval条轨迹分析一次
             reward = evaluate_on_trajectory(model, traj, target_rtg, device)
             analyze_trajectory(traj, i + 1, reward)
+            analyzed_count += 1
+    
+    if analyzed_count == 0 and len(test_trajectories) > 0:
+        # 如果没有分析任何轨迹（测试集可能小于interval），至少分析一条
+        reward = evaluate_on_trajectory(model, test_trajectories[0], target_rtg, device)
+        analyze_trajectory(test_trajectories[0], 1, reward)

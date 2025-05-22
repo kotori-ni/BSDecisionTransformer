@@ -63,8 +63,6 @@
         "reward_scale": 2.0
     },
     "DT_params": {
-        "state_dim": 96,
-        "action_dim": 5,
         "hidden_dim": 128,
         "n_layers": 3,
         "n_heads": 4,

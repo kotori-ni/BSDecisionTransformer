@@ -2,9 +2,7 @@ import torch
 import pickle
 import numpy as np
 import argparse
-import os
 import json
-from Code.BS_EV_Environment_PPO import BS_EV
 from DecisionTransformer import (
     DecisionTransformer, 
     train_model,
@@ -31,6 +29,14 @@ def main():
         print(f"未找到轨迹文件 {args.file}")
         return
 
+    # 检测状态和动作维度
+    sample_state = trajectories[0]['states'][0]
+    actual_state_dim = len(sample_state)
+    actual_action_dim = max([max(traj['actions']) for traj in trajectories]) + 1
+    
+    print(f"检测到的状态维度: {actual_state_dim}")
+    print(f"检测到的动作空间大小: {actual_action_dim}")
+
     # 分割数据集：训练集(70%)、验证集(10%)、测试集(20%)
     n_trajectories = len(trajectories)
     train_size = int(n_trajectories * 0.7)
@@ -53,8 +59,8 @@ def main():
 
     # 模型初始化
     model = DecisionTransformer(
-        state_dim=config['DT_params']['state_dim'],
-        action_dim=config['DT_params']['action_dim'],
+        state_dim=actual_state_dim,
+        action_dim=actual_action_dim,
         hidden_dim=config['DT_params']['hidden_dim'],
         n_layers=config['DT_params']['n_layers'],
         n_heads=config['DT_params']['n_heads'],
