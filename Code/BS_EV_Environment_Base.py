@@ -153,6 +153,11 @@ class BS_EV_Base:
         self.mode = 'train'  # 新增：用于区分训练/验证/测试模式
         self.pro_traces = None  # 初始化为None
         
+        # 状态空间和动作空间维度
+        self.n_states = n_RTP + n_weather * 2 + n_traffic + n_charge * 2 + 1  # RTP + weather(2维) + traffic + charge(2维) + SOC
+        self.n_actions = 3  # 0:不动作, 1:充电, 2:放电
+        self.soc_index = n_RTP + n_weather * 2 + n_traffic + n_charge * 2  # SOC在状态向量中的位置
+        
         # 环境参数
         self.min_SOC = self.config['environment']['min_SOC']
         self.SOC_charge_rate = self.config['environment']['SOC_charge_rate']

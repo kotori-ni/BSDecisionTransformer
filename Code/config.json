@@ -61,5 +61,11 @@
         "learn_interval": 20,
         "mem_size": 100000,
         "reward_scale": 2.0
+    },
+    "decision_transformer": {
+        "hidden_dim": 128,
+        "n_layers": 3,
+        "n_heads": 4,
+        "max_len": 30
     }
 } 
