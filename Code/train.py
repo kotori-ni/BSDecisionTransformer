@@ -4,7 +4,7 @@ import json
 import numpy as np
 import pickle
 from torch.utils.data import DataLoader
-from DecisionTransformer import DecisionTransformer, TrajectoryDataset, evaluate_on_trajectories, analyze_trajectory
+from DecisionTransformer import DecisionTransformer, TrajectoryDataset
 import argparse
 from tqdm import tqdm
 import logging
@@ -77,55 +77,59 @@ def train_model(model, train_loader, val_trajectories, config, device):
         
         model.train()
     
-    return model, best_model_path
+    return model
 
-def analyze_test_trajectories(model, test_trajectories, target_rtg, device, interval=100):
-    """分析测试轨迹，按指定间隔输出详细信息"""
-    logger.info("\n分析测试轨迹:")
-    analyzed_count = 0
+def evaluate_on_trajectory(model, init_state, target_rtg, device):
+    model.eval()
+    states = torch.zeros((1, model.max_len, model.state_dim), dtype=torch.float32).to(device)
+    actions = torch.zeros((1, model.max_len), dtype=torch.long).to(device)
+    rtgs = torch.full((1, model.max_len), fill_value=target_rtg, dtype=torch.float32).to(device)
+    timesteps = torch.arange(model.max_len).unsqueeze(0).to(device)
+    states[0, 0] = init_state
     
-    for i, traj in enumerate(test_trajectories):
-        if (i + 1) % interval == 0:  # 每interval条轨迹分析一次
-            mean_r, std_r = evaluate_on_trajectories(model, [traj], target_rtg, device)
-            analyze_trajectory(traj, i + 1, mean_r)
-            analyzed_count += 1
+    total_reward = 0
+    with torch.no_grad():
+        for t in range(model.max_len - 1):
+            action_pred = model(states[:, :t+1], actions[:, :t+1], rtgs[:, :t+1], timesteps[:, :t+1])
+            action = torch.argmax(action_pred[0, t], dim=-1).item()
+            actions[0, t] = action
+            
+            # 模拟环境（假设有环境对象 env）
+            next_state, reward, done = env.step(action)  # 需要替换为实际环境
+            total_reward += reward
+            rtgs[0, t+1] = rtgs[0, t] - reward  # Return-to-go 递减更新
+            states[0, t+1] = torch.tensor(next_state, dtype=torch.float32).to(device)
+            if done:
+                break
     
-    if analyzed_count == 0 and len(test_trajectories) > 0:
-        # 如果没有分析任何轨迹（测试集可能小于interval），至少分析一条
-        mean_r, std_r = evaluate_on_trajectories(model, [test_trajectories[0]], target_rtg, device)
-        analyze_trajectory(test_trajectories[0], 1, mean_r)
-    
-    # 计算总体统计信息
+    return total_reward
+
+def evaluate_on_trajectories(model, trajectories, target_rtg, device):
+    total_rewards = []
+    for traj in trajectories:
+        total_reward = evaluate_on_trajectory(model, traj['states'][0], target_rtg, device)
+        total_rewards.append(total_reward)
+    return np.mean(total_rewards), np.std(total_rewards)
+
+def analyze_test_trajectories(model, trajectories, target_rtg, device):
     actions_list = []
     soc_list = []
     rewards_list = []
     
-    for traj in tqdm(test_trajectories, desc="计算测试集统计信息"):
-        reward = evaluate_on_trajectories(model, traj, target_rtg, device)
-        rewards_list.append(reward)
+    for traj in trajectories:
+        total_reward = evaluate_on_trajectory(model, traj['states'][0], target_rtg, device)
+        total_rewards.append(total_reward)
         # 假设 SOC 是状态的第一个元素
         soc_values = [state[0] for state in traj['states']]
         soc_list.extend(soc_values)
         actions_list.extend(traj['actions'])
     
-    action_dist = np.bincount(actions_list, minlength=model.action_dim) / len(actions_list)
-    
-    logger.info(f"测试集统计:")
-    logger.info(f"动作分布: {action_dist}")
-    logger.info(f"SOC范围: [{np.min(soc_list):.2f}, {np.max(soc_list):.2f}]")
-    logger.info(f"平均SOC: {np.mean(soc_list):.2f}")
-    logger.info(f"平均奖励: {np.mean(rewards_list):.2f} ± {np.std(rewards_list):.2f}")
-    logger.info(f"最大奖励: {np.max(rewards_list):.2f}")
-    logger.info(f"最小奖励: {np.min(rewards_list):.2f}")
-
-def load_config(config_file='config.json'):
-    try:
-        with open(config_file, 'r') as file:
-            config = json.load(file)
-        return config
-    except Exception as e:
-        logging.error(f"加载配置文件失败: {str(e)}")
-        raise
+    return {
+        'action_distribution': np.bincount(actions_list) / len(actions_list),
+        'soc': np.mean(soc_list),
+        'reward_mean': np.mean(total_rewards),
+        'reward_std': np.std(total_rewards)
+    }
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -151,13 +155,17 @@ if __name__ == '__main__':
     
     # 计算目标回报
     all_rewards = [sum(traj['rewards']) for traj in trajectories]
-    target_rtg = np.mean(all_rewards) * 2
+    config = {
+        'state_dim': trajectories[0]['states'].shape[-1],
+        'action_dim': max([max(traj['actions']) for traj in trajectories]) + 1,
+        'DT_training_params': {
+            'batch_size': 64,
+            'learning_rate': 1e-4,
+            'epochs': 100,
+            'target_rtg': np.mean(all_rewards) * 2 * len(trajectories[0]['rewards'])  # 初始 return-to-go 为平均奖励的 2 倍
+        }
+    }
     
-    # 将计算得到的目标回报写回配置，供后续训练/评估直接引用
-    config.setdefault('DT_training_params', {})
-    config['DT_training_params']['target_rtg'] = target_rtg
-    
-    # 分割数据集
     n_trajectories = len(trajectories)
     train_size = int(n_trajectories * 0.7)
     val_size = int(n_trajectories * 0.1)
