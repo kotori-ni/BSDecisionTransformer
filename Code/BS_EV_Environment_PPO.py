@@ -75,9 +75,8 @@ class PPOMemory:
         self.vals = []
 
 class ActorNetwork(nn.Module):
-    def __init__(self, n_actions, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
+    def __init__(self, n_actions, input_dims, alpha, fc1_dims=512, fc2_dims=256, fc3_dims=128, chkpt_dir='../Models/'):
         super(ActorNetwork, self).__init__()
-        # 确保模型目录存在
         os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'actor_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'actor_torch_ppo_last')
@@ -86,10 +85,12 @@ class ActorNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(fc1_dims, fc2_dims),
             nn.ReLU(),
-            nn.Linear(fc2_dims, n_actions),
+            nn.Linear(fc2_dims, fc3_dims),
+            nn.ReLU(),
+            nn.Linear(fc3_dims, n_actions),
             nn.Softmax(dim=-1)
         )
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-5)
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
@@ -111,9 +112,8 @@ class ActorNetwork(nn.Module):
         self.load_state_dict(T.load(self.checkpoint_file_last, map_location=self.device))
 
 class CriticNetwork(nn.Module):
-    def __init__(self, input_dims, alpha, fc1_dims=256, fc2_dims=256, chkpt_dir='../Models/'):
+    def __init__(self, input_dims, alpha, fc1_dims=512, fc2_dims=256, fc3_dims=128, chkpt_dir='../Models/'):
         super(CriticNetwork, self).__init__()
-        # 确保模型目录存在
         os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'critic_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'critic_torch_ppo_last')
@@ -122,9 +122,11 @@ class CriticNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(fc1_dims, fc2_dims),
             nn.ReLU(),
-            nn.Linear(fc2_dims, 1)
+            nn.Linear(fc2_dims, fc3_dims),
+            nn.ReLU(),
+            nn.Linear(fc3_dims, 1)
         )
-        self.optimizer = optim.Adam(self.parameters(), lr=alpha)
+        self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-5)
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
 
@@ -186,6 +188,7 @@ class Agent:
         probs = T.squeeze(dist.log_prob(action)).item()
         action = T.squeeze(action).item()
         value = T.squeeze(value).item()
+        logging.debug(f"Action: {action}, Prob: {probs}, Value: {value}")
         return action, probs, value
 
     def learn(self):
@@ -221,9 +224,12 @@ class Agent:
                 critic_loss = (returns - critic_value) ** 2
                 critic_loss = critic_loss.mean()
                 total_loss = actor_loss + 0.5 * critic_loss
+                logging.debug(f"Actor loss: {actor_loss.item():.4f}, Critic loss: {critic_loss.item():.4f}")
                 self.actor.optimizer.zero_grad()
                 self.critic.optimizer.zero_grad()
                 total_loss.backward()
+                T.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+                T.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
                 self.actor.optimizer.step()
                 self.critic.optimizer.step()
         self.memory.clear_memory()
@@ -278,28 +284,38 @@ class BS_EV_PPO(BS_EV_Base):
         
         return self._get_state()
 
-    def evaluate_on_fixed_pro_traces(self, agent, fixed_pro_traces):
-        """在固定pro trace上评估代理，返回平均奖励"""
+    def evaluate_on_fixed_pro_traces(self, agent, fixed_pro_traces, episode_idx=None):
+        """在固定 pro_trace 上评估代理，返回平均奖励，并输出每条 trace 的动作分布和 SOC 统计"""
         agent.actor.eval()
         agent.critic.eval()
         total_rewards = []
         
         for idx, pro_trace in enumerate(fixed_pro_traces):
-            # 设置验证模式
             self.set_mode('validation')
             state = self.reset(trace_idx=None, pro_trace=pro_trace)
             done = False
             episode_reward = 0
+            action_counts = {0: 0, 1: 0, 2: 0}  # 动作计数器
+            soc_values = []  # SOC 列表
             
             while not done:
                 action, _, _ = agent.choose_action(state)
                 next_state, reward, done = self.step(action)
                 episode_reward += reward
+                action_counts[action] += 1  # 记录动作
+                soc_values.append(self.SOC)  # 记录 SOC
                 state = next_state
-                
+            
             total_rewards.append(episode_reward)
+            
+            # 输出动作分布和 SOC 统计
+            mean_soc = np.mean(soc_values)
+            std_soc = np.std(soc_values)
+            logging.info(f"Validation Episode {episode_idx if episode_idx is not None else 'N/A'}, Trace {idx}: "
+                         f"Action distribution: {action_counts}")
+            logging.info(f"Validation Episode {episode_idx if episode_idx is not None else 'N/A'}, Trace {idx}: "
+                         f"Mean SOC: {mean_soc:.3f}, Std SOC: {std_soc:.3f}, Total Reward: {episode_reward:.1f}")
         
-        # 恢复训练模式
         self.set_mode('train')
         avg_reward = np.mean(total_rewards)
         return avg_reward

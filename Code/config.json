@@ -26,14 +26,14 @@
         "gamma": 0.99,
         "alpha": 0.0001,
         "gae_lambda": 0.95,
-        "policy_clip": 0.2,
-        "batch_size": 16,
-        "n_epochs": 4,
-        "fc1_dims": 256,
+        "policy_clip": 0.1,
+        "batch_size": 4,
+        "n_epochs": 2,
+        "fc1_dims": 512,
         "fc2_dims": 256,
-        "n_games": 50,
+        "n_games": 20,
         "n_fixed_pro_traces": 100,
-        "learn_interval": 20
+        "learn_interval": 5
     },
     "dqn": {
         "gamma": 0.99,

@@ -71,7 +71,8 @@ def load_RTP(train_flag, T=31, trace_idx=None, pro_traces=None, config=None,):
             if train_flag:
                 skiprows = 24 * np.random.randint(0, 570)  # 训练集范围
             else:
-                skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
+                skiprows = 24 * 600
+                # skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
                 
         df = pd.read_table(rtp_file, sep=",", nrows=24*T, skiprows=skiprows)
         RTP = []
@@ -101,7 +102,8 @@ def load_weather(train_flag, T=31, trace_idx=None, pro_traces=None, config=None)
             if train_flag:
                 skiprows = 24 * np.random.randint(0, 570)  # 训练集范围
             else:
-                skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
+                skiprows = 24 * 600
+                # skiprows = 24 * np.random.randint(600, 699)  # 测试集范围
                 
         df = pd.read_table(weather_file, sep=",", nrows=24*T, skiprows=skiprows)
         weather = []
@@ -293,6 +295,9 @@ class BS_EV_Base:
         return list(np.concatenate(observation).flat)
 
     def step(self, action):
+        if (self.SOC < self.min_SOC+self.SOC_discharge_rate and action == 2) or (self.SOC > 1-self.SOC_charge_rate and action == 1):
+            action = 0
+
         reward = self._get_reward(action)
         self.SOC = self._get_next_SOC(action)
         self.T += 1
@@ -300,6 +305,7 @@ class BS_EV_Base:
         if (self.T) % (24 * 30) == 0:  # 30 天后结束 episode
             done = True
         next_state = self._get_state()
+        logging.debug(f"Reward: {reward}, SOC: {self.SOC}, Action: {action}")
         return next_state, reward, done
 
 if __name__ == '__main__':
