@@ -61,5 +61,19 @@
         "learn_interval": 20,
         "mem_size": 100000,
         "reward_scale": 2.0
+    },
+    "DT_params": {
+        "state_dim": 96,
+        "action_dim": 5,
+        "hidden_dim": 128,
+        "n_layers": 3,
+        "n_heads": 4,
+        "max_len": 30
+    },
+    "DT_training_params": {
+        "epochs": 40,
+        "batch_size": 4,
+        "learning_rate": 1e-4,
+        "train_ratio": 0.8
     }
 } 

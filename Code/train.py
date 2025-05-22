@@ -3,85 +3,88 @@ import pickle
 import numpy as np
 import argparse
 import os
+import json
 from Code.BS_EV_Environment_PPO import BS_EV
-from DecisionTransformer import DecisionTransformer, train_decision_transformer, evaluate_decision_transformer
+from DecisionTransformer import (
+    DecisionTransformer, 
+    train_model,
+    evaluate_on_trajectories,
+    analyze_test_trajectories
+)
 
 def main():
-    parser = argparse.ArgumentParser(description='DecisionTransformer训练脚本')
-    parser.add_argument('--type', type=str, required=True, choices=['dp', 'dqn', 'sac', 'ppo'], help='选择用于训练的轨迹类型')
-    parser.add_argument('--epochs', type=int, default=40, help='训练轮数')
-    parser.add_argument('--batch_size', type=int, default=4, help='batch size')
-    parser.add_argument('--lr', type=float, default=1e-4, help='学习率')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--file', type=str, required=True, help='轨迹文件路径')
+    parser.add_argument('--model_dir', type=str, default='../Models', help='模型保存路径')
     args = parser.parse_args()
 
-    # 环境初始化
-    env = BS_EV(n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, train_flag=True)
+    # 加载配置
+    with open('config.json', 'r') as f:
+        config = json.load(f)
     
     # 加载轨迹数据
-    traj_file = f'Trajectory/trajectories_{args.traj_type}.pkl'
     try:
-        with open(traj_file, 'rb') as f:
+        with open(args.file, 'rb') as f:
             trajectories = pickle.load(f)
-        print(f"加载了 {len(trajectories)} 条{args.traj_type.upper()}轨迹")
+        print(f"加载了 {len(trajectories)} 条轨迹")
     except FileNotFoundError:
-        print(f"未找到轨迹文件 {traj_file}，请先运行轨迹收集")
+        print(f"未找到轨迹文件 {args.file}")
         return
+
+    # 分割数据集：训练集(70%)、验证集(10%)、测试集(20%)
+    n_trajectories = len(trajectories)
+    train_size = int(n_trajectories * 0.7)
+    val_size = int(n_trajectories * 0.1)
+    
+    train_trajectories = trajectories[:train_size]
+    val_trajectories = trajectories[train_size:train_size + val_size]
+    test_trajectories = trajectories[train_size + val_size:]
+    
+    print(f"训练集大小: {len(train_trajectories)}")
+    print(f"验证集大小: {len(val_trajectories)}")
+    print(f"测试集大小: {len(test_trajectories)}")
 
     # 计算目标回报
     all_rewards = []
-    for traj in trajectories:
+    for traj in train_trajectories:
         all_rewards.extend(traj['rewards'])
-    target_rtg = 40000
+    target_rtg = np.mean(all_rewards) * len(train_trajectories[0]['rewards'])
     print(f"目标回报设置为: {target_rtg:.2f}")
 
     # 模型初始化
     model = DecisionTransformer(
-        state_dim=env.n_states,
-        action_dim=env.n_actions,
-        hidden_dim=128,
-        n_layers=3,
-        n_heads=4,
-        max_len=30
+        state_dim=config['DT_params']['state_dim'],
+        action_dim=config['DT_params']['action_dim'],
+        hidden_dim=config['DT_params']['hidden_dim'],
+        n_layers=config['DT_params']['n_layers'],
+        n_heads=config['DT_params']['n_heads'],
+        max_len=config['DT_params']['max_len']
     )
     
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = model.to(device)
 
-    print("开始训练模型...")
-    train_decision_transformer(
+    # 训练模型
+    best_model_path, _ = train_model(
         model=model,
-        trajectories=trajectories,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
+        train_trajectories=train_trajectories,
+        val_trajectories=val_trajectories,
+        config=config,
+        target_rtg=target_rtg,
+        model_dir=args.model_dir,
         device=device
     )
 
-    os.makedirs('Models', exist_ok=True)
-    model_path = f'Models/dt_model_{args.traj_type}.pth'
-    torch.save(model.state_dict(), model_path)
-    print(f"模型已保存到 {model_path}")
+    # 在测试集上评估最佳模型
+    print("\n在测试集上评估最佳模型...")
+    model.load_state_dict(torch.load(best_model_path))
+    test_mean_reward, test_std_reward = evaluate_on_trajectories(
+        model, test_trajectories, target_rtg, device
+    )
+    print(f"测试集平均奖励: {test_mean_reward:.2f} ± {test_std_reward:.2f}")
 
-    # 评估模型
-    print("\n开始评估模型...")
-    # 若有best模型可加载best，否则加载刚刚训练的
-    best_model_path = f'Models/dt_model_best_{args.traj_type}.pth'
-    if os.path.exists(best_model_path):
-        model.load_state_dict(torch.load(best_model_path))
-        print(f"加载最优模型: {best_model_path}")
-    else:
-        model.load_state_dict(torch.load(model_path))
-        print(f"加载刚刚训练的模型: {model_path}")
-    eval_rewards = []
-    for _ in range(30):
-        reward = evaluate_decision_transformer(model, env, target_rtg, max_len=30, device=device)
-        eval_rewards.append(reward)
-        print(f"评估回合奖励: {reward:.2f}")
-    
-    print(f"\n评估结果:")
-    print(f"平均奖励: {np.mean(eval_rewards):.2f}")
-    print(f"标准差: {np.std(eval_rewards):.2f}")
-    print(f"最大奖励: {np.max(eval_rewards):.2f}")
-    print(f"最小奖励: {np.min(eval_rewards):.2f}")
+    # 分析测试轨迹
+    analyze_test_trajectories(model, test_trajectories, target_rtg, interval=100, device=device)
 
 if __name__ == "__main__":
     main()
