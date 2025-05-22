@@ -36,6 +36,9 @@ class DecisionTransformer(nn.Module):
     def forward(self, states, actions, rtgs, timesteps):
         batch_size, seq_len = states.size(0), states.size(1)
         
+        # 确保timesteps在嵌入范围内
+        timesteps = torch.clamp(timesteps, 0, self.max_len - 1)
+        
         state_emb = self.state_embedding(states)
         action_emb = self.action_embedding(actions)
         rtg_emb = self.rtg_embedding(rtgs.unsqueeze(-1))
@@ -44,7 +47,8 @@ class DecisionTransformer(nn.Module):
         inputs = torch.stack((rtg_emb, state_emb, action_emb), dim=2).reshape(batch_size, seq_len * 3, self.hidden_dim)
         inputs = inputs + timestep_emb.repeat(1, 3, 1)
         
-        mask = self._generate_square_subsequent_mask(seq_len * 3).to(states.device)
+        # 直接在当前计算设备上生成掩码，省去一次 .to() 拷贝
+        mask = self._generate_square_subsequent_mask(seq_len * 3, device=states.device)
         output = self.transformer(inputs.transpose(0, 1), mask=mask).transpose(0, 1)
         
         action_token_states = output[:, 1::3]
@@ -52,8 +56,18 @@ class DecisionTransformer(nn.Module):
         
         return action_pred
 
-    def _generate_square_subsequent_mask(self, sz):
-        mask = (torch.triu(torch.ones(sz, sz)) == 1).transpose(0, 1)
+    def _generate_square_subsequent_mask(self, sz, device=None):
+        """生成方形后续掩码（下三角矩阵）
+
+        参数:
+            sz (int): 掩码的方形大小 (seq_len)
+            device (torch.device, optional): 在哪个设备上创建掩码；默认为与模型参数相同的设备。
+        """
+        if device is None:
+            device = next(self.parameters()).device
+
+        # 直接在目标设备上创建，避免之后再调用 .to(device)
+        mask = (torch.triu(torch.ones(sz, sz, device=device)) == 1).transpose(0, 1)
         mask = mask.float().masked_fill(mask == 0, float('-inf')).masked_fill(mask == 1, float(0.0))
         return mask
 
@@ -100,171 +114,152 @@ def analyze_trajectory(traj, traj_idx, model_reward=None):
     actions = traj['actions']
     states = traj['states']
     
+    # 确保actions是numpy数组
+    if isinstance(actions, torch.Tensor):
+        actions = actions.cpu().numpy()
+    else:
+        actions = np.array(actions)
+    
     # 计算动作分布
-    action_counts = np.bincount(actions, minlength=5)
+    action_counts = np.bincount(actions, minlength=5)  # 假设至少有5个动作
     action_dist = action_counts / len(actions)
     
     # 提取SOC状态（假设SOC是状态向量的第一个元素）
-    soc_values = states[:, 0]
+    # 确保states是numpy数组
+    if isinstance(states[0], torch.Tensor):
+        soc_values = np.array([state[0].cpu().item() for state in states])
+    else:
+        soc_values = np.array([state[0] for state in states])
     
     print(f"\n轨迹 {traj_idx} 分析:")
     print(f"动作分布: {action_dist}")
     print(f"SOC范围: [{np.min(soc_values):.2f}, {np.max(soc_values):.2f}]")
     print(f"平均SOC: {np.mean(soc_values):.2f}")
     print(f"轨迹长度: {len(actions)}")
-    print(f"原始奖励: {sum(traj['rewards']):.2f}")
+    
+    # 计算原始奖励
+    if 'rewards' in traj:
+        rewards = traj['rewards']
+        if isinstance(rewards, torch.Tensor):
+            rewards = rewards.cpu().numpy()
+        else:
+            rewards = np.array(rewards)
+        print(f"原始奖励: {np.sum(rewards):.2f}")
+    
     if model_reward is not None:
         print(f"模型预测奖励: {model_reward:.2f}")
 
-def evaluate_on_trajectory(model, traj, target_rtg, device):
-    """在单条轨迹上评估模型性能"""
+def evaluate_on_trajectories_batch(model, trajectories, target_rtg, device, batch_size=32):
+    """批量评估多条轨迹"""
     model.eval()
-    state = traj['states'][0]
-    done = False
-    total_reward = 0
-    t = 0
-    
-    # 使用模型的状态维度
+    total_rewards = []
     state_dim = model.state_dim
-    states = torch.zeros((1, model.max_len, state_dim), dtype=torch.float32, device=device)
-    actions = torch.zeros((1, model.max_len), dtype=torch.long, device=device)
-    rtgs = torch.full((1, model.max_len), fill_value=target_rtg, dtype=torch.float32, device=device)
-    timesteps = torch.zeros((1, model.max_len), dtype=torch.long, device=device)
+    max_len = model.max_len
+    batch_rewards = torch.zeros(batch_size, dtype=torch.float32, device=device)
+    batch_done = torch.zeros(batch_size, dtype=torch.bool, device=device)
+    batch_t = torch.zeros(batch_size, dtype=torch.long, device=device)
     
-    while not done and t < len(traj['states']):
-        states[0, t] = torch.tensor(state, dtype=torch.float32, device=device)
-        timesteps[0, t] = t
+    # 按批次处理轨迹
+    for batch_idx in range(0, len(trajectories), batch_size):
+        batch_trajectories = trajectories[batch_idx:batch_idx + batch_size]
+        curr_batch_size = len(batch_trajectories)
+        
+        # 预分配张量
+        states = torch.zeros((curr_batch_size, max_len, state_dim), dtype=torch.float32, device=device)
+        actions = torch.zeros((curr_batch_size, max_len), dtype=torch.long, device=device)
+        rtgs = torch.full((curr_batch_size, max_len), fill_value=target_rtg, dtype=torch.float32, device=device)
+        timesteps = torch.arange(max_len, dtype=torch.long, device=device).unsqueeze(0).expand(curr_batch_size, -1)
+        
+        # 初始化状态和轨迹长度
+        batch_states = [traj['states'] for traj in batch_trajectories]
+        batch_rewards.fill_(0)
+        batch_done.fill_(False)
+        batch_t.fill_(0)
+        
+        # 获取最大轨迹长度
+        max_traj_len = max(len(traj['states']) for traj in batch_trajectories)
         
         with torch.no_grad():
-            action_pred = model(states, actions, rtgs, timesteps)
-        action = torch.argmax(action_pred[0, t], dim=-1).item()
+            while not batch_done.all() and batch_t.max() < max_traj_len:
+                # 更新当前状态
+                for i in range(curr_batch_size):
+                    if not batch_done[i]:
+                        t = batch_t[i].item()
+                        states[i, t % max_len] = torch.tensor(batch_states[i][min(t, len(batch_states[i])-1)], 
+                                                             dtype=torch.float32, device=device)
+                
+                # 预测动作
+                curr_len = min(batch_t.max().item() + 1, max_len)
+                curr_states = states[:, :curr_len]
+                curr_actions = actions[:, :curr_len]
+                curr_rtgs = rtgs[:, :curr_len]
+                curr_timesteps = timesteps[:, :curr_len]
+                
+                action_pred = model(curr_states, curr_actions, curr_rtgs, curr_timesteps)
+                
+                # 获取动作并更新
+                for i in range(curr_batch_size):
+                    if not batch_done[i]:
+                        t = batch_t[i].item()
+                        if t % max_len < action_pred.size(1):
+                            action = torch.argmax(action_pred[i, t % max_len], dim=-1)
+                        else:
+                            action = torch.argmax(action_pred[i, -1], dim=-1)
+                        actions[i, t % max_len] = action
+                        
+                        # 获取奖励和下一状态
+                        if t < len(batch_trajectories[i]['rewards']):
+                            reward = batch_trajectories[i]['rewards'][t]
+                        else:
+                            reward = 0
+                        batch_rewards[i] += reward
+                        rtgs[i, t % max_len] = rtgs[i, t % max_len] - reward  # Return-to-go 递减更新
+                        
+                        # 检查是否结束
+                        if t >= len(batch_trajectories[i]['states']) - 1:
+                            batch_done[i] = True
+                        
+                        batch_t[i] += 1
+                
+                # 滑动窗口
+                if batch_t.max().item() % max_len == 0 and not batch_done.all():
+                    shift = max_len // 2
+                    for i in range(curr_batch_size):
+                        if not batch_done[i]:
+                            states[i] = torch.cat([states[i, shift:], 
+                                                 torch.zeros((shift, state_dim), device=device)], dim=0)
+                            actions[i] = torch.cat([actions[i, shift:], 
+                                                  torch.zeros(shift, dtype=torch.long, device=device)], dim=0)
+                            rtgs[i] = torch.cat([rtgs[i, shift:], rtgs[i, -shift:]], dim=0)
         
-        next_state = traj['states'][t]
-        reward = traj['rewards'][t]
-        done = (t == len(traj['states']) - 1)
-        
-        total_reward += reward
-        actions[0, t] = action
-        state = next_state
-        t += 1
-        
-        if t >= model.max_len:
-            states = torch.cat((states[:, 1:], torch.zeros((1, 1, state_dim), device=device)), dim=1)
-            actions = torch.cat((actions[:, 1:], torch.zeros((1, 1), dtype=torch.long, device=device)), dim=1)
-            rtgs = torch.cat((rtgs[:, 1:], torch.full((1, 1), fill_value=target_rtg, device=device)), dim=1)
-            timesteps = torch.cat((timesteps[:, 1:], torch.tensor([[t]], dtype=torch.long, device=device)), dim=1)
-            t -= 1
+        total_rewards.extend(batch_rewards[:curr_batch_size].cpu().numpy())
     
-    return total_reward
+    return total_rewards
 
 def evaluate_on_trajectories(model, trajectories, target_rtg, device):
     """在多条轨迹上评估模型性能"""
     total_rewards = []
     
-    for traj in trajectories:
-        reward = evaluate_on_trajectory(model, traj, target_rtg, device)
-        total_rewards.append(reward)
+    # 使用tqdm显示进度
+    try:
+        from tqdm import tqdm
+        iterator = tqdm(range(0, len(trajectories), 32), desc="评估轨迹批次")
+    except ImportError:
+        print("评估轨迹中...")
+        iterator = range(0, len(trajectories), 32)
+    
+    for batch_idx in iterator:
+        batch_trajectories = trajectories[batch_idx:batch_idx + 32]
+        try:
+            # 批量评估
+            batch_rewards = evaluate_on_trajectories_batch(model, batch_trajectories, target_rtg, device, batch_size=32)
+            total_rewards.extend(batch_rewards)
+        except Exception as e:
+            print(f"评估轨迹批次 {batch_idx} 时出错: {e}")
+            continue
+    
+    if not total_rewards:
+        print("警告: 没有成功评估任何轨迹")
+        return 0.0, 0.0
     
     return np.mean(total_rewards), np.std(total_rewards)
-
-def train_model(model, train_trajectories, val_trajectories, config, target_rtg, 
-                model_dir='../Models', device='cuda'):
-    """训练决策Transformer模型并保存最佳模型"""
-    # 创建数据加载器
-    train_dataset = TrajectoryDataset(train_trajectories, max_len=model.max_len)
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=config['DT_training_params']['batch_size'],
-        shuffle=True
-    )
-
-    # 创建优化器和损失函数
-    optimizer = torch.optim.Adam(model.parameters(), lr=config['DT_training_params']['learning_rate'])
-    criterion = torch.nn.CrossEntropyLoss()
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=2)
-
-    # 创建模型保存目录
-    os.makedirs(model_dir, exist_ok=True)
-    best_val_reward = float('-inf')
-    best_model_path = f'{model_dir}/dt_model_best.pth'
-    final_model_path = f'{model_dir}/dt_model_final.pth'
-
-    print("\n开始训练模型...")
-    for epoch in range(config['DT_training_params']['epochs']):
-        # 训练阶段
-        model.train()
-        total_loss = 0
-        correct_actions = 0
-        total_actions = 0
-        
-        for batch in train_loader:
-            states = batch['states'].to(device)
-            actions = batch['actions'].to(device)
-            rtgs = batch['rtgs'].to(device)
-            timesteps = batch['timesteps'].to(device)
-
-            # 前向传播
-            action_pred = model(states, actions, rtgs, timesteps)
-            loss = criterion(action_pred.view(-1, model.action_dim), actions.view(-1))
-
-            # 反向传播
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-
-            total_loss += loss.item()
-            
-            # 计算动作准确率
-            pred_actions = torch.argmax(action_pred, dim=-1)
-            correct_actions += (pred_actions == actions).sum().item()
-            total_actions += actions.numel()
-
-        # 计算训练指标
-        avg_loss = total_loss / len(train_loader)
-        accuracy = correct_actions / total_actions
-        
-        # 在验证集上评估
-        val_mean_reward, val_std_reward = evaluate_on_trajectories(
-            model, val_trajectories, target_rtg, device
-        )
-        
-        # 更新学习率
-        scheduler.step(val_mean_reward)
-        
-        print(f"\nEpoch {epoch + 1}/{config['DT_training_params']['epochs']}")
-        print(f"训练损失: {avg_loss:.4f}")
-        print(f"训练准确率: {accuracy:.4f}")
-        print(f"验证集平均奖励: {val_mean_reward:.2f} ± {val_std_reward:.2f}")
-        print(f"学习率: {optimizer.param_groups[0]['lr']:.6f}")
-        
-        # 保存最佳模型
-        if val_mean_reward > best_val_reward:
-            best_val_reward = val_mean_reward
-            torch.save(model.state_dict(), best_model_path)
-            print(f"保存新的最佳模型，验证集奖励: {best_val_reward:.2f}")
-
-    # 保存最终模型
-    torch.save(model.state_dict(), final_model_path)
-    print(f"\n训练完成！")
-    print(f"最佳模型已保存到: {best_model_path}")
-    print(f"最终模型已保存到: {final_model_path}")
-    
-    return best_model_path, final_model_path
-
-def analyze_test_trajectories(model, test_trajectories, target_rtg, 
-                              interval=100, device='cuda'):
-    """分析测试轨迹，每interval条输出一次结果"""
-    print("\n分析测试轨迹:")
-    analyzed_count = 0
-    
-    for i, traj in enumerate(test_trajectories):
-        if (i + 1) % interval == 0:  # 每interval条轨迹分析一次
-            reward = evaluate_on_trajectory(model, traj, target_rtg, device)
-            analyze_trajectory(traj, i + 1, reward)
-            analyzed_count += 1
-    
-    if analyzed_count == 0 and len(test_trajectories) > 0:
-        # 如果没有分析任何轨迹（测试集可能小于interval），至少分析一条
-        reward = evaluate_on_trajectory(model, test_trajectories[0], target_rtg, device)
-        analyze_trajectory(test_trajectories[0], 1, reward)
