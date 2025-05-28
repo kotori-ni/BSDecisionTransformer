@@ -5,6 +5,9 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils import clip_grad_norm_
 import os
 import logging
+import argparse
+import pickle
+import json
 
 # 设置日志配置
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
@@ -23,7 +26,7 @@ if not logging.getLogger().handlers:
     )
 
 class DecisionTransformer(nn.Module):
-    def __init__(self, state_dim, action_dim, config=None, hidden_dim=128, n_layers=3, n_heads=4, max_len=30):
+    def __init__(self, state_dim, action_dim, config=None, hidden_dim=128, n_layers=3, n_heads=4, max_len=30, dropout=0.1):
         super(DecisionTransformer, self).__init__()
 
         # 允许通过 config.json 统一管理超参数
@@ -32,24 +35,30 @@ class DecisionTransformer(nn.Module):
             n_layers = config.get("n_layers", n_layers)
             n_heads = config.get("n_heads", n_heads)
             max_len = config.get("max_len", max_len)
+            dropout = config.get("dropout", dropout)
 
         self.state_dim = state_dim
         self.action_dim = action_dim
         self.hidden_dim = hidden_dim
         self.max_len = max_len
+        self.dropout = dropout
 
         # Embedding 层
         self.state_embedding = nn.Linear(state_dim, hidden_dim)
-        self.action_embedding = nn.Embedding(action_dim, hidden_dim)  # 使用embedding代替one-hot+linear
+        self.state_layernorm = nn.LayerNorm(hidden_dim)
+        self.action_embedding = nn.Embedding(action_dim, hidden_dim)
+        self.action_layernorm = nn.LayerNorm(hidden_dim)
         self.rtg_embedding = nn.Linear(1, hidden_dim)
-        self.timestep_embedding = nn.Embedding(max_len, hidden_dim)   # 时间步嵌入
+        self.rtg_layernorm = nn.LayerNorm(hidden_dim)
+        self.timestep_embedding = nn.Embedding(max_len, hidden_dim)
+        self.embed_dropout = nn.Dropout(dropout)
 
         # Transformer 编码器（带 causal mask）
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=hidden_dim,
             nhead=n_heads,
             dim_feedforward=hidden_dim * 4,
-            dropout=0.1,
+            dropout=dropout,
             batch_first=True
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
@@ -58,7 +67,7 @@ class DecisionTransformer(nn.Module):
         self.action_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, action_dim)
         )
 
@@ -67,8 +76,11 @@ class DecisionTransformer(nn.Module):
 
         # 嵌入 token
         state_emb = self.state_embedding(states)
-        action_emb = self.action_embedding(actions)  # 假设actions为整数索引 [batch, seq_len]
+        state_emb = self.state_layernorm(state_emb)
+        action_emb = self.action_embedding(actions)
+        action_emb = self.action_layernorm(action_emb)
         rtg_emb = self.rtg_embedding(rtgs.unsqueeze(-1))
+        rtg_emb = self.rtg_layernorm(rtg_emb)
 
         # 添加 timestep 嵌入
         time_embed = self.timestep_embedding(timesteps)
@@ -78,6 +90,7 @@ class DecisionTransformer(nn.Module):
 
         # Interleave: [R1, s1, a1, R2, s2, a2, ..., Rt, st, at]
         inputs = torch.stack((rtg_emb, state_emb, action_emb), dim=2).reshape(batch_size, seq_len * 3, self.hidden_dim)
+        inputs = self.embed_dropout(inputs)
 
         # 掩码
         if mask is None:
@@ -109,7 +122,7 @@ class TrajectoryDataset(Dataset):
     def __getitem__(self, idx):
         traj = self.trajectories[idx]
         
-        # 安全转换states
+        # 转换states
         try:
             if isinstance(traj['states'][0], np.ndarray):
                 # 如果是numpy数组，先转换为列表
@@ -119,8 +132,6 @@ class TrajectoryDataset(Dataset):
                 states = torch.tensor(traj['states'], dtype=torch.float32)
         except Exception as e:
             print(f"警告: 转换states失败: {e}")
-            # 使用零矩阵作为备选
-            states = torch.zeros((self.max_len, traj['states'][0].shape[0] if hasattr(traj['states'][0], 'shape') else 1), dtype=torch.float32)
         
         # 安全转换actions
         try:
@@ -132,8 +143,6 @@ class TrajectoryDataset(Dataset):
                 actions = torch.tensor(traj['actions'], dtype=torch.long)
         except Exception as e:
             print(f"警告: 转换actions失败: {e}")
-            # 使用零作为备选
-            actions = torch.zeros(len(states), dtype=torch.long)
         
         # 安全转换rtgs
         try:
@@ -145,29 +154,6 @@ class TrajectoryDataset(Dataset):
                 rtgs = torch.tensor(traj['rtgs'], dtype=torch.float32)
         except Exception as e:
             print(f"警告: 转换rtgs失败: {e}")
-            # 如果失败，尝试从rewards计算
-            if 'rewards' in traj:
-                try:
-                    # 简单累积rewards作为rtgs
-                    rewards = traj['rewards']
-                    if isinstance(rewards[0], np.ndarray):
-                        rewards_list = [float(r.item() if hasattr(r, 'item') else r) for r in rewards]
-                    else:
-                        rewards_list = [float(r) for r in rewards]
-                    
-                    # 从后向前累积计算rtgs
-                    rtgs_list = []
-                    cumulative = 0
-                    for r in reversed(rewards_list):
-                        cumulative = r + 0.99 * cumulative  # 使用0.99作为默认折扣因子
-                        rtgs_list.insert(0, cumulative)
-                    rtgs = torch.tensor(rtgs_list, dtype=torch.float32)
-                except:
-                    # 如果仍然失败，使用常数
-                    rtgs = torch.ones(len(states), dtype=torch.float32)
-            else:
-                # 没有rewards，使用常数
-                rtgs = torch.ones(len(states), dtype=torch.float32)
         
         # 创建timesteps
         timesteps = torch.arange(len(states), dtype=torch.long)
@@ -282,220 +268,56 @@ def train_decision_transformer(model, trajectories, epochs=20, batch_size=4, lr=
         # 只记录每个epoch的总结信息
         logging.info(f"Epoch {epoch+1}/{epochs} - 损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 最佳准确率: {best_accuracy:.4f}, 学习率: {optimizer.param_groups[0]['lr']:.6f}")
 
-def evaluate_decision_transformer(model, env, target_rtg, max_len=30, device='cuda'):
-    model.eval()
-    state = torch.tensor(env.reset(), dtype=torch.float32, device=device)
-    done = False
-    total_reward = 0
 
-    states = torch.zeros((1, max_len, env.n_states), dtype=torch.float32, device=device)
-    actions = torch.zeros((1, max_len), dtype=torch.long, device=device)
-    rtgs = torch.full((1, max_len), fill_value=target_rtg, dtype=torch.float32, device=device)
-    timesteps = torch.zeros((1, max_len), dtype=torch.long, device=device)
-    t = 0
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--file', type=str, required=True)
+    parser.add_argument('--epochs', type=int, default=60)
+    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--lr', type=float, default=1e-4)
+    args = parser.parse_args()
 
-    logging.info(f"开始评估，目标RTG: {target_rtg}")
-    
-    while not done:
-        states[0, t] = state
-        timesteps[0, t] = t
+    logging.info("=" * 50)
+    logging.info(f"开始新的训练任务: {args.file}")
+    logging.info(f"训练参数: epochs={args.epochs}, batch_size={args.batch_size}, lr={args.lr}")
 
-        with torch.no_grad():
-            action_pred = model(states, actions, rtgs, timesteps)
-        action = torch.argmax(action_pred[0, t], dim=-1).item()
-
-        next_state, reward, done = env.step(action)
-        next_state = torch.tensor(next_state, dtype=torch.float32, device=device)
-        total_reward += reward
-
-        actions[0, t] = action
-        state = next_state
-        t += 1
-        
-        if t % 20 == 0:  # 每20步记录一次
-            logging.debug(f"评估步骤 {t}，当前累计奖励: {total_reward:.2f}")
-
-        if t >= max_len:
-            # 滑动窗口
-            states = torch.cat((states[:, 1:], torch.zeros((1, 1, env.n_states), device=device)), dim=1)
-            actions = torch.cat((actions[:, 1:], torch.zeros((1, 1), dtype=torch.long, device=device)), dim=1)
-            rtgs = torch.cat((rtgs[:, 1:], torch.full((1, 1), fill_value=target_rtg, device=device)), dim=1)
-            timesteps = torch.cat((timesteps[:, 1:], torch.tensor([[t]], dtype=torch.long, device=device)), dim=1)
-            t -= 1
-    
-    logging.info(f"评估完成，总奖励: {total_reward:.2f}")
-    return total_reward
-
-# -------------------------------------------------------------
-# 针对单条离线轨迹进行评估，返回预测动作序列与 SOC 信息等
-# 注意: 在每一步使用真实奖励递减 rtgs，以符合 Decision Transformer 设定
-# -------------------------------------------------------------
-
-def evaluate_on_trajectory(model, trajectory, env, device='cuda', max_len=30):
-    model.eval()
-    logging.info(f"开始在单条轨迹上评估模型")
-
-    # 直接使用torch.tensor
+    # 加载轨迹数据
+    traj_file = args.file
     try:
-        states_arr = torch.tensor(trajectory['states'], dtype=torch.float32, device=device)
-    except Exception as e:
-        print(f"警告: 转换states时出错: {e}")
-        # 尝试逐元素转换
-        states_list = []
-        for state in trajectory['states']:
-            try:
-                if isinstance(state, np.ndarray):
-                    states_list.append([float(x) for x in state])
-                else:
-                    states_list.append(state)
-            except:
-                # 如果仍然失败，使用0向量
-                states_list.append([0.0] * env.n_states)
-        states_arr = torch.tensor(states_list, dtype=torch.float32, device=device)
+        with open(traj_file, 'rb') as f:
+            trajectories = pickle.load(f)
+        logging.info(f"加载了 {len(trajectories)} 条轨迹: {traj_file}")
+    except FileNotFoundError:
+        logging.error(f"未找到轨迹文件 {traj_file}，请先运行轨迹收集")
+        exit()
 
-    rewards_arr = trajectory.get('rewards')
-    if rewards_arr is not None:
-        try:
-            # 处理不同类型的rewards
-            if isinstance(rewards_arr, (list, np.ndarray)):
-                # 逐个元素转换确保兼容性
-                rewards_list = []
-                for r in rewards_arr:
-                    if isinstance(r, np.ndarray) and r.size == 1:
-                        rewards_list.append(float(r.item()))
-                    else:
-                        rewards_list.append(float(r))
-                rewards_arr = torch.tensor(rewards_list, dtype=torch.float32, device=device)
-            else:
-                # 单个值情况
-                rewards_arr = torch.tensor([float(rewards_arr)], dtype=torch.float32, device=device)
-        except Exception as e:
-            print(f"警告: 转换rewards时出错: {e}")
-            # 如果转换失败，尝试使用rtgs
-            rtgs = trajectory.get('rtgs')
-            if rtgs is not None:
-                try:
-                    if isinstance(rtgs, (list, np.ndarray)):
-                        rtgs_list = [float(r) for r in rtgs]
-                        rewards_arr = torch.tensor(rtgs_list, dtype=torch.float32, device=device)
-                    else:
-                        rewards_arr = torch.tensor([float(rtgs)], dtype=torch.float32, device=device)
-                except:
-                    # 如果仍然失败，设为None
-                    rewards_arr = None
-            else:
-                rewards_arr = None
+    # 设置设备
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    logging.info(f"使用设备: {device}")
 
-    seq_len = states_arr.shape[0]
-    max_len = min(max_len, seq_len)
+    with open(os.path.join(os.path.dirname(__file__), 'config.json'), 'r', encoding='utf-8') as cf:
+        config = json.load(cf)
+    dt_config = config.get('decision_transformer', {})
 
-    # 初始化张量缓存
-    states = torch.zeros((1, max_len, env.n_states), dtype=torch.float32, device=device)
-    actions = torch.zeros((1, max_len), dtype=torch.long, device=device)
-
-    # return-to-go 初始化为真实剩余回报，若没有 rewards 则退化为常数 0
-    if rewards_arr is not None:
-        try:
-            remaining_rtg = float(rewards_arr.sum().item())
-        except Exception as e:
-            print(f"警告: 计算总奖励时出错: {e}")
-            remaining_rtg = 0.0
-    else:
-        rtgs = trajectory.get('rtgs', [0])
-        try:
-            if isinstance(rtgs, (list, np.ndarray)) and len(rtgs) > 0:
-                # 如果rtgs是numpy数组元素，需要转换
-                if isinstance(rtgs[0], np.ndarray):
-                    remaining_rtg = float(rtgs[0].item())
-                else:
-                    remaining_rtg = float(rtgs[0])
-            elif not isinstance(rtgs, (list, np.ndarray)):
-                remaining_rtg = float(rtgs)
-            else:
-                remaining_rtg = 0.0
-        except Exception as e:
-            print(f"警告: 获取rtg时出错: {e}")
-            remaining_rtg = 0.0
-
-    rtgs = torch.full((1, max_len), remaining_rtg, dtype=torch.float32, device=device)
-    timesteps = torch.zeros((1, max_len), dtype=torch.long, device=device)
-
-    actions_pred = []
-    soc_values = []
-    try:
-        rewards_pred = torch.zeros_like(rewards_arr) if rewards_arr is not None else torch.zeros(seq_len, device=device)
-    except Exception as e:
-        print(f"警告: 创建rewards_pred时出错: {e}")
-        rewards_pred = torch.zeros(seq_len, device=device)
-
-    soc_index = getattr(env, 'soc_index', 0)  # 若环境未指定，默认取 state 第 0 维
-
-    for t in range(seq_len):
-        if t >= max_len:
-            # 滑动窗口: 移除最早一步数据，末尾补零
-            states = torch.cat((states[:, 1:], torch.zeros((1, 1, env.n_states), device=device)), dim=1)
-            actions = torch.cat((actions[:, 1:], torch.zeros((1, 1), dtype=torch.long, device=device)), dim=1)
-            rtgs = torch.cat((rtgs[:, 1:], torch.full((1, 1), remaining_rtg, device=device)), dim=1)
-            timesteps = torch.cat((timesteps[:, 1:], torch.tensor([[t]], dtype=torch.long, device=device)), dim=1)
-            cur_idx = max_len - 1
-        else:
-            cur_idx = t
-
-        # 写入当前时刻状态
-        states[0, cur_idx] = states_arr[t]
-        timesteps[0, cur_idx] = t if t < max_len else max_len - 1
-
-        with torch.no_grad():
-            action_logits = model(states, actions, rtgs, timesteps)
-        action = torch.argmax(action_logits[0, cur_idx], dim=-1).item()
-
-        actions[0, cur_idx] = action
-        actions_pred.append(action)
-
-        # 记录 SOC
-        soc_values.append(float(states_arr[t, soc_index].item()))
-        
-        # 由于大多数环境没有compute_reward方法，这里改用_get_reward
-        # _get_reward通常是私有方法，但我们尝试访问它以获取更准确的奖励预测
-        try:
-            # 临时存储当前环境状态
-            tmp_T = env.T
-            tmp_SOC = env.SOC
-            
-            # 设置环境状态与轨迹状态一致
-            env.T = t % (24*30)  # 假设环境T是循环的
-            env.SOC = float(states_arr[t, soc_index].item())
-            
-            # 使用环境的_get_reward方法计算预测奖励
-            reward_pred = env._get_reward(action)
-            
-            # 恢复环境状态
-            env.T = tmp_T
-            env.SOC = tmp_SOC
-            
-            rewards_pred[t] = reward_pred
-        except (AttributeError, NotImplementedError):
-            # 如果环境没有compute_reward方法，则使用原始奖励（不太准确但作为备选）
-            if rewards_arr is not None and t < len(rewards_arr):
-                rewards_pred[t] = rewards_arr[t]
-
-        # 根据真实奖励递减 remaining_rtg，并写回 rtgs。（若 rewards 不可用，则保持不变）
-        if rewards_arr is not None and t < len(rewards_arr):
-            try:
-                remaining_rtg -= float(rewards_arr[t].item())
-            except Exception as e:
-                # 如果获取item失败，尝试直接转换
-                try:
-                    remaining_rtg -= float(rewards_arr[t])
-                except:
-                    # 如果仍然失败，不更新remaining_rtg
-                    pass
-
-        # 将新的 remaining_rtg 填充到当前位置之后的所有 rtg token（简单实现）
-        rtgs[0, cur_idx:] = remaining_rtg
-
-    # 计算SOC平均值
-    soc_mean = torch.tensor(soc_values, device=device).mean().item()
-    logging.info(f"轨迹评估完成，SOC平均值: {soc_mean:.3f}")
+    # 模型初始化
+    model = DecisionTransformer(
+        state_dim=145,
+        action_dim=3,
+        config=dt_config
+    )
     
-    return actions_pred, soc_mean, rewards_arr, rewards_pred
+    logging.info("开始训练模型...")
+    train_decision_transformer(
+        model=model,
+        trajectories=trajectories,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        device=device
+    )
+
+    os.makedirs('../Models', exist_ok=True)
+    model_name = os.path.splitext(os.path.basename(traj_file))[0]
+    model_path = f'../Models/dt_model_{model_name}.pth'
+    torch.save(model.state_dict(), model_path)
+    logging.info(f"模型已保存到 {model_path}")

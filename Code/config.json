@@ -17,8 +17,8 @@
         "pro_traces_file": "../Data/pro_traces.pkl"
     },
     "dp": {
-        "n_SOC_states": 100,
-        "gamma": 0.99,
+        "n_SOC_states": 101,
+        "gamma": 1.00,
         "max_iterations": 1000,
         "convergence_threshold": 1e-6
     },
