@@ -17,8 +17,8 @@
         "pro_traces_file": "../Data/pro_traces.pkl"
     },
     "dp": {
-        "n_SOC_states": 100,
-        "gamma": 0.99,
+        "n_SOC_states": 101,
+        "gamma": 1.00,
         "max_iterations": 1000,
         "convergence_threshold": 1e-6
     },
@@ -62,16 +62,10 @@
         "mem_size": 100000,
         "reward_scale": 2.0
     },
-    "DT_params": {
+    "decision_transformer": {
         "hidden_dim": 128,
         "n_layers": 3,
         "n_heads": 4,
         "max_len": 30
-    },
-    "DT_training_params": {
-        "epochs": 40,
-        "batch_size": 4,
-        "learning_rate": 1e-4,
-        "train_ratio": 0.8
     }
 } 
