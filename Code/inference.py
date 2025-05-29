@@ -1,18 +1,17 @@
-import os
 import pickle
 import torch
-import numpy as np
+import json
+from tqdm import tqdm
 from DecisionTransformer import DecisionTransformer
 from BS_EV_Environment_Base import simulate_actions, load_traces, BS_EV_Base
 
 # 配置
-trace_file = "../Data/pro_traces.pkl"
+trace_file = "../Data/pro_traces_test.pkl"
 model_path = "../Models/dt_model_best.pth"
 config_path = "config.json"
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # 读取config
-import json
 with open(config_path, "r", encoding="utf-8") as f:
     config = json.load(f)
 dt_config = config.get("decision_transformer", {})
@@ -29,13 +28,14 @@ model.eval()
 traces = load_traces(trace_file)
 
 # 推理每个trace
-for idx, trace in enumerate(traces):
+for idx, trace in enumerate(tqdm(traces, desc="推理进度", total=len(traces))):
     env = BS_EV_Base()
     state = env.reset(trace)
     done = False
     action_seq = []
     max_len = model.max_len if hasattr(model, 'max_len') else dt_config.get("max_len", 30)
-    # 设定目标RTG（可用一个较大值或经验均值）
+    
+    # 设定目标RTG
     target_return = 2000.0
     rtgs = [target_return]
     states = [state]
@@ -62,10 +62,17 @@ for idx, trace in enumerate(traces):
         t += 1
     trace["DT_action"] = action_seq
 
+    # 输出动作分布
+    action_counts = {0: 0, 1: 0, 2: 0}
+    for action in action_seq:
+        action_counts[action] += 1
+    print(f"动作分布: {action_counts}")
+
+
 # 保存带有DT_action的traces
 with open(trace_file, "wb") as f:
     pickle.dump(traces, f)
 print("所有trace动作序列已写入DT_action并保存。")
 
 # 调用simulate_actions计算收益
-simulate_actions("DT", trace_file)
+# simulate_actions("DT", trace_file)

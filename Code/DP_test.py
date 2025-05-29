@@ -240,12 +240,12 @@ class BS_EV_DP(BS_EV_Base):
         # 创建reward分布图
         plt.figure(figsize=(12, 6))
         
-        # 计算bin的边界（以1000为单位）
+        # 计算bin的边界（以100为单位）
         min_reward = np.min(total_rewards)
         max_reward = np.max(total_rewards)
-        bin_start = np.floor(min_reward / 1000) * 1000
-        bin_end = np.ceil(max_reward / 1000) * 1000
-        bins = np.arange(bin_start, bin_end + 1000, 1000)
+        bin_start = np.floor(min_reward / 100) * 100
+        bin_end = np.ceil(max_reward / 100) * 100
+        bins = np.arange(bin_start, bin_end + 100, 100)
         
         # 绘制柱状图
         plt.hist(total_rewards, bins=bins, edgecolor='black', alpha=0.7)

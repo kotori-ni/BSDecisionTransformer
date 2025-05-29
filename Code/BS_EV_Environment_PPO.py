@@ -15,7 +15,8 @@ from BS_EV_Environment_Base import (
     load_weather,
     load_traffic,
     load_charge,
-    load_config
+    load_config,
+    load_traces
 )
 
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
@@ -75,21 +76,36 @@ class PPOMemory:
         self.vals = []
 
 class ActorNetwork(nn.Module):
-    def __init__(self, n_actions, input_dims, alpha, fc1_dims=512, fc2_dims=256, fc3_dims=128, chkpt_dir='../Models/'):
+    def __init__(self, n_actions, input_dims, alpha, fc1_dims=512, fc2_dims=512, fc3_dims=256, fc4_dims=128, chkpt_dir='../Models/'):
         super(ActorNetwork, self).__init__()
         os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'actor_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'actor_torch_ppo_last')
+        
         self.actor = nn.Sequential(
             nn.Linear(input_dims, fc1_dims),
             nn.ReLU(),
+            nn.LayerNorm(fc1_dims),
+            nn.Dropout(0.1),
+            
             nn.Linear(fc1_dims, fc2_dims),
             nn.ReLU(),
+            nn.LayerNorm(fc2_dims),
+            nn.Dropout(0.1),
+            
             nn.Linear(fc2_dims, fc3_dims),
             nn.ReLU(),
-            nn.Linear(fc3_dims, n_actions),
+            nn.LayerNorm(fc3_dims),
+            nn.Dropout(0.1),
+            
+            nn.Linear(fc3_dims, fc4_dims),
+            nn.ReLU(),
+            nn.LayerNorm(fc4_dims),
+            
+            nn.Linear(fc4_dims, n_actions),
             nn.Softmax(dim=-1)
         )
+        
         self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-5)
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
@@ -112,20 +128,36 @@ class ActorNetwork(nn.Module):
         self.load_state_dict(T.load(self.checkpoint_file_last, map_location=self.device))
 
 class CriticNetwork(nn.Module):
-    def __init__(self, input_dims, alpha, fc1_dims=512, fc2_dims=256, fc3_dims=128, chkpt_dir='../Models/'):
+    def __init__(self, input_dims, alpha, fc1_dims=512, fc2_dims=512, fc3_dims=256, fc4_dims=128, chkpt_dir='../Models/'):
         super(CriticNetwork, self).__init__()
         os.makedirs(chkpt_dir, exist_ok=True)
         self.checkpoint_file_best = os.path.join(chkpt_dir, 'critic_torch_ppo_best')
         self.checkpoint_file_last = os.path.join(chkpt_dir, 'critic_torch_ppo_last')
+        
+        # 更深的网络结构，增加LayerNorm和Dropout
         self.critic = nn.Sequential(
             nn.Linear(input_dims, fc1_dims),
             nn.ReLU(),
+            nn.LayerNorm(fc1_dims),
+            nn.Dropout(0.1),
+            
             nn.Linear(fc1_dims, fc2_dims),
             nn.ReLU(),
+            nn.LayerNorm(fc2_dims),
+            nn.Dropout(0.1),
+            
             nn.Linear(fc2_dims, fc3_dims),
             nn.ReLU(),
-            nn.Linear(fc3_dims, 1)
+            nn.LayerNorm(fc3_dims),
+            nn.Dropout(0.1),
+            
+            nn.Linear(fc3_dims, fc4_dims),
+            nn.ReLU(),
+            nn.LayerNorm(fc4_dims),
+            
+            nn.Linear(fc4_dims, 1)
         )
+        
         self.optimizer = optim.Adam(self.parameters(), lr=alpha, weight_decay=1e-5)
         self.device = T.device("cuda" if T.cuda.is_available() else "cpu")
         self.to(self.device)
@@ -234,183 +266,104 @@ class Agent:
                 self.critic.optimizer.step()
         self.memory.clear_memory()
 
-class BS_EV_PPO(BS_EV_Base):
-    def __init__(self, n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, config_file='config.json', train_flag=True):
-        super().__init__(n_charge, n_traffic, n_RTP, n_weather, config_file, trace_idx=0)
-        self.n_actions = 3  # 充电、放电、不操作
-        self.n_states = n_RTP + n_weather * 2 + n_traffic + n_charge * 2 + 1  # 状态维度
-        self.gamma = self.config.get('ppo', {}).get('gamma', 0.99)
-        self.epsilon = self.config.get('ppo', {}).get('epsilon', 0.1)
-        self.train_flag = train_flag  # 控制训练/测试数据加载
-        self.set_mode('train' if train_flag else 'test')  # 根据train_flag设置初始模式
-
-    def reset(self, trace_idx=None, pro_trace=None):
-        """
-        重置环境
-        Args:
-            trace_idx: 测试集pro trace的索引，仅用于测试
-            pro_trace: 验证用的固定pro trace，仅用于验证
-        """
-        self.SOC = 0.5
-        self.T = 0
-        
-        # 根据模式加载数据
-        if self.mode == 'test':
-            # 测试模式：使用测试集数据
-            self.RTP = load_RTP(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
-            self.weather = load_weather(train_flag=False, trace_idx=trace_idx, pro_traces=self.pro_traces, config=self.config)
-        elif self.mode == 'validation':
-            # 验证模式：使用训练集数据
-            self.RTP = load_RTP(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
-            self.weather = load_weather(train_flag=False, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
-        else:  # train mode
-            # 训练模式：使用训练集数据
-            self.RTP = load_RTP(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
-            self.weather = load_weather(train_flag=True, trace_idx=None, pro_traces=self.pro_traces, config=self.config)
-        
-        self.traffic = load_traffic(config=self.config)
-        self.charge = load_charge(config=self.config)
-        
-        # 根据场景选择pro trace
-        if self.mode == 'test' and trace_idx is not None:
-            # 测试场景：使用测试集pro trace
-            self.current_pro_trace = self.pro_traces[trace_idx]["pro_trace"]
-        elif self.mode == 'validation' and pro_trace is not None:
-            # 验证场景：使用传入的固定pro trace
-            self.current_pro_trace = pro_trace
-        else:
-            # 训练场景：随机生成pro trace
-            self.current_pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
-        
-        return self._get_state()
-
-    def evaluate_on_fixed_pro_traces(self, agent, fixed_pro_traces, episode_idx=None):
-        """在固定 pro_trace 上评估代理，返回平均奖励，并输出每条 trace 的动作分布和 SOC 统计"""
-        agent.actor.eval()
-        agent.critic.eval()
-        total_rewards = []
-        
-        for idx, pro_trace in enumerate(fixed_pro_traces):
-            self.set_mode('validation')
-            state = self.reset(trace_idx=None, pro_trace=pro_trace)
-            done = False
-            episode_reward = 0
-            action_counts = {0: 0, 1: 0, 2: 0}  # 动作计数器
-            soc_values = []  # SOC 列表
-            
-            while not done:
-                action, _, _ = agent.choose_action(state)
-                next_state, reward, done = self.step(action)
-                episode_reward += reward
-                action_counts[action] += 1  # 记录动作
-                soc_values.append(self.SOC)  # 记录 SOC
-                state = next_state
-            
-            total_rewards.append(episode_reward)
-            
-            # 输出动作分布和 SOC 统计
-            mean_soc = np.mean(soc_values)
-            std_soc = np.std(soc_values)
-            logging.info(f"Validation Episode {episode_idx if episode_idx is not None else 'N/A'}, Trace {idx}: "
-                         f"Action distribution: {action_counts}")
-            logging.info(f"Validation Episode {episode_idx if episode_idx is not None else 'N/A'}, Trace {idx}: "
-                         f"Mean SOC: {mean_soc:.3f}, Std SOC: {std_soc:.3f}, Total Reward: {episode_reward:.1f}")
-        
-        self.set_mode('train')
-        avg_reward = np.mean(total_rewards)
-        return avg_reward
-
-    def collect_optimal_trajectories(self, agent, filename='../Trajectories/optimal_trajectories_ppo.pkl'):
-        """使用最佳模型在pro_traces.pkl上收集轨迹"""
-        logging.info("Starting optimal trajectory collection")
-        agent.load_models_best()
-        agent.actor.eval()
-        agent.critic.eval()
-        
-        # 确保在测试模式下运行
-        self.set_mode('test')
-        
-        trajectories = []
-        trace_stats = []
-
-        for trace_idx in range(len(self.pro_traces)):
-            logging.info(f"Collecting trajectory for test trace {trace_idx}/{len(self.pro_traces)-1}")
-            trajectory = {
-                'states': [],
-                'actions': [],
-                'rewards': [],
-                'rtgs': [],
-                'dones': [],
-                'trace_idx': trace_idx
-            }
-            
-            # 使用测试集数据
-            state = self.reset(trace_idx=trace_idx)
-            done = False
-            episode_rewards = []
-            soc_values = []
-            action_counts = {0: 0, 1: 0, 2: 0}
-            
-            while not done:
-                action, _, _ = agent.choose_action(state)
-                next_state, reward, done = self.step(action)
-                trajectory['states'].append(np.array(state, dtype=np.float32))
-                trajectory['actions'].append(np.array(action, dtype=np.int32))
-                trajectory['rewards'].append(np.array(reward, dtype=np.float32))
-                trajectory['dones'].append(np.array(done, dtype=bool))
-                episode_rewards.append(reward)
-                soc_values.append(self.SOC)
-                action_counts[action] += 1
-                state = next_state
-            
-            rtgs = []
-            cumulative_reward = 0
-            for r in reversed(episode_rewards):
-                cumulative_reward = r + self.gamma * cumulative_reward
-                rtgs.insert(0, cumulative_reward)
-            trajectory['rtgs'] = rtgs
-            
-            trajectories.append(trajectory)
-            trace_stats.append({
-                'trace_idx': trace_idx,
-                'total_reward': sum(episode_rewards),
-                'mean_soc': np.mean(soc_values),
-                'std_soc': np.std(soc_values),
-                'action_counts': action_counts
-            })
-            
-            logging.info(f"Trace {trace_idx}: Total reward: {sum(episode_rewards):.2f}")
-            logging.info(f"Trace {trace_idx}: Mean SOC: {np.mean(soc_values):.3f}, Std SOC: {np.std(soc_values):.3f}")
-            logging.info(f"Trace {trace_idx}: Action distribution: {action_counts}")
-        
-        self.trajectories = trajectories
-        
-        # 保存轨迹
-        try:
-            os.makedirs(os.path.dirname(filename), exist_ok=True)
-            with open(filename, 'wb') as f:
-                pickle.dump(trajectories, f)
-            logging.info(f"Optimal trajectories saved to {filename}")
-        except Exception as e:
-            logging.error(f"Error saving optimal trajectories: {str(e)}")
-            raise
-            
-        return trajectories
-
-def plot_learning_curve(x, train_scores, val_scores, figure_file):
-    # 确保Figure目录存在
-    os.makedirs(os.path.dirname(figure_file), exist_ok=True)
+# 预测函数：使用训练好的模型对traces进行预测
+def predict_actions_for_traces(model_path_best, env, traces, output_file):
+    """
+    使用训练好的PPO模型对traces进行预测，并将动作序列写入PPO_action属性
     
-    plt.figure(figsize=(10, 6))
-    plt.plot(x, train_scores, 'b-', label='Training Score')
-    plt.plot(x, val_scores, 'r-', label='Validation Score')
-    plt.title('PPO Learning Curves')
-    plt.xlabel('Episode')
-    plt.ylabel('Reward')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(figure_file)
-    plt.close()
+    Args:
+        model_path_best: 最佳模型的路径前缀（不包含文件扩展名）
+        env: 环境实例
+        traces: 包含pro_trace的traces列表
+        output_file: 输出文件路径
+    """
+    logging.info("开始使用训练好的模型进行预测...")
+    
+    # 创建临时agent用于加载模型
+    agent = Agent(n_actions=env.n_actions, 
+                 input_dims=env.n_states,
+                 gamma=0.99,  # 默认值
+                 alpha=0.0001)  # 学习率在推理时不重要
+    
+    # 加载最佳模型
+    try:
+        actor_model_path = model_path_best.replace('_best', '') + '_best'
+        agent.actor.checkpoint_file_best = actor_model_path
+        agent.critic.checkpoint_file_best = actor_model_path.replace('actor', 'critic')
+        agent.load_models_best()
+        logging.info(f"成功加载模型: {actor_model_path}")
+    except Exception as e:
+        logging.error(f"加载模型失败: {str(e)}")
+        raise
+    
+    # 设置为评估模式
+    agent.actor.eval()
+    agent.critic.eval()
+    
+    # 对每个trace进行预测
+    for trace_idx, trace in enumerate(traces):
+        logging.info(f"正在预测trace {trace_idx}/{len(traces)-1}")
+        
+        # 重置环境
+        state = env.reset(trace)
+        done = False
+        action_sequence = []
+        
+        # 运行一个完整episode并记录动作
+        with T.no_grad():  # 推理时不需要梯度
+            while not done:
+                action, _, _ = agent.choose_action(state)
+                action_sequence.append(action)
+                next_state, _, done = env.step(action)
+                state = next_state
+        
+        # 将预测的动作序列写入PPO_action属性
+        trace['PPO_action'] = action_sequence
+        
+        logging.info(f"Trace {trace_idx}: 预测了 {len(action_sequence)} 步动作")
+        logging.info(f"Trace {trace_idx}: 动作分布 - 不动作: {action_sequence.count(0)}, "
+                     f"充电: {action_sequence.count(1)}, 放电: {action_sequence.count(2)}")
+    
+    # 保存更新后的traces
+    try:
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        with open(output_file, 'wb') as f:
+            pickle.dump(traces, f)
+        logging.info(f"预测结果已保存到: {output_file}")
+    except Exception as e:
+        logging.error(f"保存预测结果失败: {str(e)}")
+        raise
+    
+    logging.info("预测完成！")
+
+def run_ppo_prediction(model_path, traces_file, output_file, config_file='config.json'):
+    """
+    独立的预测函数，可以单独调用进行PPO模型预测
+    
+    Args:
+        model_path: 训练好的模型路径（actor模型的完整路径）
+        traces_file: 包含traces的输入文件
+        output_file: 预测结果输出文件
+        config_file: 配置文件路径
+    
+    使用示例:
+        run_ppo_prediction('../Models/actor_torch_ppo_best', 
+                          '../Data/pro_traces.pkl', 
+                          '../Data/pro_traces_with_ppo_predictions.pkl')
+    """
+    logging.info(f"开始PPO预测: 模型={model_path}, 输入={traces_file}, 输出={output_file}")
+    
+    # 初始化环境
+    env = BS_EV_Base(n_charge=24, n_traffic=24, n_RTP=24, n_weather=24, 
+                     config_file=config_file, train_flag=False)
+    
+    # 加载traces
+    traces = load_traces(traces_file)
+    logging.info(f"加载了 {len(traces)} 条traces")
+    
+    # 进行预测
+    predict_actions_for_traces(model_path, env, traces, output_file)
+    logging.info("PPO预测完成！")
 
 if __name__ == "__main__":
     # 初始化必要的目录
@@ -439,21 +392,28 @@ if __name__ == "__main__":
     config = load_config()
     ppo_config = config['ppo']
 
-    # 初始化环境（训练模式）
-    env = BS_EV_PPO(train_flag=True)
-    n_fixed_pro_traces = ppo_config['n_fixed_pro_traces']  # 固定验证pro trace数量
+    # 初始化环境（使用BS_EV_Base）
+    env = BS_EV_Base(train_flag=True)
+    
+    # 加载训练traces
+    train_traces_file = '../Data/pro_traces.pkl'
+    if not os.path.exists(train_traces_file):
+        logging.error(f"训练traces文件不存在: {train_traces_file}")
+        raise FileNotFoundError(f"请先生成训练traces文件: {train_traces_file}")
+    
+    all_traces = load_traces(train_traces_file)
+    # 分割训练集和测试集（假设前80%为训练，后20%为测试）
+    split_idx = int(len(all_traces) * 0.8)
+    train_traces = all_traces[:split_idx]
+    test_traces = all_traces[split_idx:]
+    
+    logging.info(f"加载了 {len(train_traces)} 条训练traces和 {len(test_traces)} 条测试traces")
+    
     n_games = ppo_config['n_games']  # 训练episode数量
     batch_size = ppo_config['batch_size']
     n_epochs = ppo_config['n_epochs']
     alpha = ppo_config['alpha']
     N = ppo_config['learn_interval']  # 每N步学习一次
-
-    # 生成固定验证pro trace（独立于测试集）
-    fixed_pro_traces = []
-    for _ in range(n_fixed_pro_traces):
-        pro_trace = [random.uniform(0, 1) for _ in range(24 * 31)]
-        fixed_pro_traces.append(pro_trace)
-    logging.info(f"Generated {len(fixed_pro_traces)} fixed pro traces for validation")
 
     # 初始化PPO代理
     agent = Agent(n_actions=env.n_actions, 
@@ -467,48 +427,65 @@ if __name__ == "__main__":
 
     # 训练PPO模型
     best_score = float('-inf')
-    train_score_history = []  # 新增：记录训练分数
-    val_score_history = []    # 重命名：验证分数
+    train_score_history = []  # 记录训练分数
     n_steps = 0
     learn_iters = 0
     figure_file = '../Figure/learning_curve_ppo.png'
 
     for i in tqdm(range(n_games), desc="Training PPO"):
-        # 训练阶段：使用随机生成的pro trace
-        observation = env.reset()  # 不传trace_idx和pro_trace，将随机生成
+        # 训练阶段：从训练traces中随机选择一个trace
+        trace = random.choice(train_traces)
+        state = env.reset(trace)
         done = False
         score = 0
         agent.actor.train()
         agent.critic.train()
         
         while not done:
-            action, prob, val = agent.choose_action(observation)
-            observation_, reward, done = env.step(action)
+            action, prob, val = agent.choose_action(state)
+            next_state, reward, done, action = env.step(action)
             n_steps += 1
             score += reward
-            agent.remember(observation, action, prob, val, reward, done)
+            agent.remember(state, action, prob, val, reward, done)
             if n_steps % N == 0:
                 agent.learn()
                 learn_iters += 1
-            observation = observation_
+            state = next_state
         
         train_score_history.append(score)
         
-        # 验证阶段：使用固定的pro trace
-        avg_score = env.evaluate_on_fixed_pro_traces(agent, fixed_pro_traces)
-        val_score_history.append(avg_score)
-        
-        if avg_score > best_score:
-            best_score = avg_score
+        # 保存最佳模型（基于训练分数）
+        if score > best_score:
+            best_score = score
             agent.save_models_best()
         
-        logging.info(f"Episode {i}: Train score {score:.1f}, Avg validation score {avg_score:.1f}, "
+        logging.info(f"Episode {i}: Train score {score:.1f}, Best score {best_score:.1f}, "
                      f"Time steps {n_steps}, Learning steps {learn_iters}")
     
     agent.save_models_last()
-    logging.info(f"Training completed. Best validation score: {best_score:.1f}")
+    logging.info(f"Training completed. Best training score: {best_score:.1f}")
 
-    # 绘制学习曲线
-    x = [i+1 for i in range(len(val_score_history))]
-    plot_learning_curve(x, train_score_history, val_score_history, figure_file)
-    logging.info(f"Learning curve saved to {figure_file}")
+    # 绘制训练曲线
+    x = [i+1 for i in range(len(train_score_history))]
+    plt.figure(figsize=(10, 6))
+    plt.plot(x, train_score_history, 'b-', label='Training Score')
+    plt.title('PPO Training Curve')
+    plt.xlabel('Episode')
+    plt.ylabel('Reward')
+    plt.legend()
+    plt.grid(True)
+    plt.savefig(figure_file)
+    plt.close()
+    logging.info(f"Training curve saved to {figure_file}")
+    
+    # 使用训练好的模型进行预测
+    logging.info("开始对测试traces进行预测...")
+    model_path = '../Models/actor_torch_ppo_best'
+    output_file = '../Data/pro_traces_with_ppo_predictions.pkl'
+    predict_actions_for_traces(model_path, env, test_traces, output_file)
+
+    # 如果要单独运行预测，可以使用以下代码：
+    # if __name__ == "__main__":
+    #     run_ppo_prediction('../Models/actor_torch_ppo_best', 
+    #                       '../Data/pro_traces.pkl', 
+    #                       '../Data/pro_traces_with_ppo_predictions.pkl')

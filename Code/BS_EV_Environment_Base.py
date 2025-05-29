@@ -243,7 +243,7 @@ class BS_EV_Base:
             done = True
         next_state = self._get_state()
         logging.debug(f"Reward: {reward}, SOC: {self.SOC}, Action: {action}")
-        return next_state, reward, done
+        return next_state, reward, done, action
 
 
 def simulate_actions(action_type, trace_file):

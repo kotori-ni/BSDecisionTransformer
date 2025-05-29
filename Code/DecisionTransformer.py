@@ -8,6 +8,9 @@ import logging
 import argparse
 import pickle
 import json
+from sklearn.model_selection import train_test_split
+from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 # 设置日志配置
 log_dir = os.path.join(os.path.dirname(__file__), '..', 'Log')
@@ -61,7 +64,7 @@ class DecisionTransformer(nn.Module):
             dropout=dropout,
             batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(transformer_layer, num_layers=n_layers)
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=n_layers)
         
         self.action_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
@@ -70,7 +73,7 @@ class DecisionTransformer(nn.Module):
             nn.Linear(hidden_dim, action_dim)
         )
 
-    def forward(self, states, actions, rtgs, timesteps):
+    def forward(self, states, actions, rtgs, timesteps, mask=None):
         batch_size, seq_len = states.size(0), states.size(1)
         
         # 确保timesteps在嵌入范围内
@@ -95,7 +98,7 @@ class DecisionTransformer(nn.Module):
 
         # 掩码
         if mask is None:
-            mask = self._generate_square_subsequent_mask(seq_len * 3).to(inputs.device)
+            mask = self._generate_square_subsequent_mask(seq_len * 3, device=inputs.device)
 
         # Transformer 编码
         output = self.transformer(inputs, mask=mask)
@@ -195,121 +198,168 @@ class TrajectoryDataset(Dataset):
             'timesteps': timesteps.to(self.device)
         }
 
-def analyze_trajectory(traj, traj_idx, model_reward=None):
-    """分析轨迹的动作分布和SOC状态"""
-    actions = traj['actions']
-    states = traj['states']
-    
-    # 确保actions是numpy数组
-    if isinstance(actions, torch.Tensor):
-        actions = actions.cpu().numpy()
-    else:
-        actions = np.array(actions)
-    
-    # 计算动作分布
-    action_counts = np.bincount(actions, minlength=5)  # 假设至少有5个动作
-    action_dist = action_counts / len(actions)
-    
-    # 提取SOC状态（假设SOC是状态向量的第一个元素）
-    # 确保states是numpy数组
-    if isinstance(states[0], torch.Tensor):
-        soc_values = np.array([state[0].cpu().item() for state in states])
-    else:
-        soc_values = np.array([state[0] for state in states])
-    
-    print(f"\n轨迹 {traj_idx} 分析:")
-    print(f"动作分布: {action_dist}")
-    print(f"SOC范围: [{np.min(soc_values):.2f}, {np.max(soc_values):.2f}]")
-    print(f"平均SOC: {np.mean(soc_values):.2f}")
-    print(f"轨迹长度: {len(actions)}")
-    
-    # 计算原始奖励
-    if 'rewards' in traj:
-        rewards = traj['rewards']
-        if isinstance(rewards, torch.Tensor):
-            rewards = rewards.cpu().numpy()
-        else:
-            rewards = np.array(rewards)
-        print(f"原始奖励: {np.sum(rewards):.2f}")
-    
-    if model_reward is not None:
-        print(f"模型预测奖励: {model_reward:.2f}")
+def train_decision_transformer(model, train_trajectories, val_trajectories=None, epochs=20, batch_size=4, lr=1e-4, device='cuda'):
+    model = model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2)
 
-    dataset = TrajectoryDataset(trajectories, max_len=model.max_len, device=device)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    
-    logging.info(f"开始训练，共{epochs}个epochs，数据集大小：{len(dataset)}，批次大小：{batch_size}")
+    train_dataset = TrajectoryDataset(train_trajectories, max_len=model.max_len, device=device)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    if val_trajectories is not None:
+        val_dataset = TrajectoryDataset(val_trajectories, max_len=model.max_len, device=device)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
-    best_loss = float('inf')
-    best_accuracy = 0.0  # 跟踪最佳准确率
+    # 记录训练过程中的指标
+    train_losses_history = []
+    train_accs_history = []
+    val_losses_history = []
+    val_accs_history = []
+    epochs_history = []
+
+    best_val_acc = 0.0
+    best_val_loss = float('inf')
     for epoch in range(epochs):
+        # 训练
         model.train()
-        total_loss = 0
-        correct_actions = 0
-        total_actions = 0
-        
-        # 记录批次进度
-        batch_count = len(dataloader)
-        
-        for batch_idx, batch in enumerate(dataloader):
-            states = batch['states']
-            actions = batch['actions']
-            rtgs = batch['rtgs']
-            timesteps = batch['timesteps']
-
-            # 前向传播
+        total_loss, correct, total = 0, 0, 0
+        train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{epochs} [Train]', leave=True)
+        for batch in train_pbar:
+            states, actions, rtgs, timesteps = batch['states'], batch['actions'], batch['rtgs'], batch['timesteps']
             action_pred = model(states, actions, rtgs, timesteps)
             loss = criterion(action_pred.view(-1, model.action_dim), actions.view(-1))
-
-            # 反向传播
             optimizer.zero_grad()
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)  # 添加梯度裁剪
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             total_loss += loss.item()
+            pred = torch.argmax(action_pred, dim=-1)
+            correct += (pred == actions).sum().item()
+            total += actions.numel()
             
-            # 计算动作准确率
-            pred_actions = torch.argmax(action_pred, dim=-1)
-            correct_actions += (pred_actions == actions).sum().item()
-            total_actions += actions.numel()
-            
-            # 在控制台显示进度（不写入日志）
-            if (batch_idx + 1) % 10 == 0:
-                batch_acc = (pred_actions == actions).float().mean().item()
-                print(f"Epoch {epoch+1}/{epochs} [{batch_idx+1}/{batch_count}] "
-                      f"损失: {loss.item():.4f}, 准确率: {batch_acc:.4f}, "
-                      f"进度: {(batch_idx+1)/batch_count*100:.1f}%", end="\r")
+            # 更新进度条显示
+            current_acc = correct / total if total > 0 else 0
+            train_pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{current_acc:.4f}'})
+        
+        train_acc = correct / total
+        train_loss = total_loss / len(train_loader)
+        
+        # 记录训练指标
+        epochs_history.append(epoch + 1)
+        train_losses_history.append(train_loss)
+        train_accs_history.append(train_acc)
 
-        avg_loss = total_loss / len(dataloader)
-        accuracy = correct_actions / total_actions
-        
-        # 清除进度行
-        print(" " * 100, end="\r")
-        
-        # 更新学习率
-        scheduler.step(avg_loss)
-        
-        # 根据准确率保存最佳模型
-        model_improved = False
-        if accuracy > best_accuracy:
-            # 准确率更高，保存模型
-            best_accuracy = accuracy
-            best_loss = avg_loss  # 重置最佳损失
-            model_improved = True
-            logging.info(f"保存最佳模型，准确率提高: {accuracy:.4f}, 损失: {avg_loss:.4f}")
-        elif accuracy == best_accuracy and avg_loss < best_loss:
-            # 准确率相同但损失更低，也保存模型
-            best_loss = avg_loss
-            model_improved = True
-            logging.info(f"保存最佳模型，相同准确率下损失降低: {accuracy:.4f}, 损失: {avg_loss:.4f}")
+        # 验证
+        if val_trajectories is not None:
+            model.eval()
+            val_loss, val_correct, val_total = 0, 0, 0
+            val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]', leave=False)
+            with torch.no_grad():
+                for batch in val_pbar:
+                    states, actions, rtgs, timesteps = batch['states'], batch['actions'], batch['rtgs'], batch['timesteps']
+                    action_pred = model(states, actions, rtgs, timesteps)
+                    loss = criterion(action_pred.view(-1, model.action_dim), actions.view(-1))
+                    val_loss += loss.item()
+                    pred = torch.argmax(action_pred, dim=-1)
+                    val_correct += (pred == actions).sum().item()
+                    val_total += actions.numel()
+                    
+                    # 更新进度条显示
+                    current_val_acc = val_correct / val_total if val_total > 0 else 0
+                    val_pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{current_val_acc:.4f}'})
             
-        if model_improved:
-            os.makedirs('../Models', exist_ok=True)
-            torch.save(model.state_dict(), '../Models/dt_model_best.pth')
+            val_acc = val_correct / val_total
+            val_loss = val_loss / len(val_loader)
+            
+            # 记录验证指标
+            val_losses_history.append(val_loss)
+            val_accs_history.append(val_acc)
+            
+            scheduler.step(val_loss)
+            logging.info(f'Epoch {epoch+1}: Train Loss {train_loss:.4f}, Acc {train_acc:.4f} | Val Loss {val_loss:.4f}, Acc {val_acc:.4f}')
+            # 保存最佳模型
+            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
+                best_val_acc = val_acc
+                best_val_loss = val_loss
+                torch.save(model.state_dict(), '../Models/dt_model_best.pth')
+        else:
+            # 没有验证集时记录None
+            val_losses_history.append(None)
+            val_accs_history.append(None)
+            
+            scheduler.step(train_loss)
+            logging.info(f'Epoch {epoch+1}: Train Loss {train_loss:.4f}, Acc {train_acc:.4f}')
         
-        # 只记录每个epoch的总结信息
-        logging.info(f"Epoch {epoch+1}/{epochs} - 损失: {avg_loss:.4f}, 准确率: {accuracy:.4f}, 最佳准确率: {best_accuracy:.4f}, 学习率: {optimizer.param_groups[0]['lr']:.6f}")
+    # 训练结束后绘制学习曲线
+    plot_learning_curves(epochs_history, train_losses_history, train_accs_history, 
+                         val_losses_history, val_accs_history, has_validation=val_trajectories is not None)
 
+def plot_learning_curves(epochs, train_losses, train_accs, val_losses, val_accs, has_validation=True):
+    """
+    绘制训练和验证的学习曲线
+    """
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    
+    # 绘制Loss曲线
+    ax1.plot(epochs, train_losses, 'b-', label='Train Loss', linewidth=2, marker='o', markersize=3)
+    if has_validation and val_losses[0] is not None:
+        # 过滤掉None值
+        val_epochs = [e for e, v in zip(epochs, val_losses) if v is not None]
+        val_loss_filtered = [v for v in val_losses if v is not None]
+        ax1.plot(val_epochs, val_loss_filtered, 'r-', label='Val Loss', linewidth=2, marker='s', markersize=3)
+    
+    ax1.set_xlabel('Epoch', fontsize=12)
+    ax1.set_ylabel('Loss', fontsize=12)
+    ax1.set_title('Training and Validation Loss', fontsize=14, fontweight='bold')
+    ax1.legend(fontsize=11)
+    ax1.grid(True, alpha=0.3)
+    ax1.set_xlim(1, max(epochs))
+    
+    # 绘制Accuracy曲线
+    ax2.plot(epochs, train_accs, 'b-', label='Train Accuracy', linewidth=2, marker='o', markersize=3)
+    if has_validation and val_accs[0] is not None:
+        # 过滤掉None值
+        val_epochs = [e for e, v in zip(epochs, val_accs) if v is not None]
+        val_acc_filtered = [v for v in val_accs if v is not None]
+        ax2.plot(val_epochs, val_acc_filtered, 'r-', label='Val Accuracy', linewidth=2, marker='s', markersize=3)
+    
+    ax2.set_xlabel('Epoch', fontsize=12)
+    ax2.set_ylabel('Accuracy', fontsize=12)
+    ax2.set_title('Training and Validation Accuracy', fontsize=14, fontweight='bold')
+    ax2.legend(fontsize=11)
+    ax2.grid(True, alpha=0.3)
+    ax2.set_xlim(1, max(epochs))
+    ax2.set_ylim(0, 1)
+    
+    # 调整布局
+    plt.tight_layout()
+    
+    # 保存图片
+    figure_dir = '../Figure'
+    os.makedirs(figure_dir, exist_ok=True)
+    figure_path = os.path.join(figure_dir, 'learning_curve_dt.png')
+    plt.savefig(figure_path, dpi=300, bbox_inches='tight')
+    logging.info(f"学习曲线已保存到: {figure_path}")
+    
+    # 打印训练摘要
+    logging.info("=" * 50)
+    logging.info("训练摘要")
+    logging.info("=" * 50)
+    logging.info(f"总epoch数: {len(epochs)}")
+    logging.info(f"最终训练损失: {train_losses[-1]:.4f}")
+    logging.info(f"最终训练准确率: {train_accs[-1]:.4f}")
+    logging.info(f"最佳训练准确率: {max(train_accs):.4f}")
+    logging.info(f"最低训练损失: {min(train_losses):.4f}")
+    
+    if has_validation and val_accs[0] is not None:
+        val_loss_filtered = [v for v in val_losses if v is not None]
+        val_acc_filtered = [v for v in val_accs if v is not None]
+        logging.info(f"最终验证损失: {val_loss_filtered[-1]:.4f}")
+        logging.info(f"最终验证准确率: {val_acc_filtered[-1]:.4f}")
+        logging.info(f"最佳验证准确率: {max(val_acc_filtered):.4f}")
+        logging.info(f"最低验证损失: {min(val_loss_filtered):.4f}")
+    
+    plt.close()  # 关闭图形以释放内存
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
@@ -333,6 +383,9 @@ if __name__ == "__main__":
         logging.error(f"未找到轨迹文件 {traj_file}，请先运行轨迹收集")
         exit()
 
+    # 划分训练/验证集（9:1）
+    train_trajs, val_trajs = train_test_split(trajectories, test_size=0.1, random_state=42)
+
     # 设置设备
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logging.info(f"使用设备: {device}")
@@ -351,7 +404,8 @@ if __name__ == "__main__":
     logging.info("开始训练模型...")
     train_decision_transformer(
         model=model,
-        trajectories=trajectories,
+        train_trajectories=train_trajs,
+        val_trajectories=val_trajs,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
