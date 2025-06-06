@@ -246,12 +246,14 @@ class BS_EV_Base:
         return next_state, reward, done, action
 
 
-def simulate_actions(action_type, trace_file):
+def simulate_actions(action_type, trace_file, return_stats=False):
         
-    assert action_type in ["DP", "PPO", "SAC", "DQN", "Nop"]
+    assert action_type in ["DP", "PPO", "SAC", "DQN", "Nop", "DT"]
 
     traces = load_traces(trace_file)
     env = BS_EV_Base()
+    
+    all_rewards = []
 
     for idx in range(len(traces)):
         env.reset(traces[idx])
@@ -262,14 +264,27 @@ def simulate_actions(action_type, trace_file):
         action_list = traces[idx][action_name] if action_name != "Nop_action" else [0] * 720
 
         for i, action in enumerate(action_list): 
-            _, reward, done = env.step(action)
+            _, reward, done, _ = env.step(action)
             total_reward += reward
 
         traces[idx][reward_name] = total_reward
+        all_rewards.append(total_reward)
         print(f"trace_idx: {idx}, action: {action_name}, Total reward: {total_reward}")
 
     with open(trace_file, "wb") as f:
         pickle.dump(traces, f)
+    
+    if return_stats:
+        # 计算统计信息
+        stats = {
+            "avg_reward": np.mean(all_rewards),
+            "std_reward": np.std(all_rewards),
+            "min_reward": np.min(all_rewards),
+            "max_reward": np.max(all_rewards),
+            "median_reward": np.median(all_rewards),
+            "total_traces": len(all_rewards)
+        }
+        return stats
 
 if __name__ == '__main__':
     traces_file = "../Data/pro_traces.pkl"

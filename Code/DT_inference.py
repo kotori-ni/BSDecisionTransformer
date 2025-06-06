@@ -54,7 +54,7 @@ for idx, trace in enumerate(tqdm(traces, desc="推理进度", total=len(traces))
             action = torch.argmax(action_logits[0, -1]).item()
         action_seq.append(action)
         # 环境交互
-        next_state, reward, done = env.step(action)
+        next_state, reward, done, _ = env.step(action)
         # 更新序列
         states.append(next_state)
         actions.append(action)

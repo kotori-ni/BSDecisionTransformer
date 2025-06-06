@@ -198,7 +198,7 @@ class TrajectoryDataset(Dataset):
             'timesteps': timesteps.to(self.device)
         }
 
-def train_decision_transformer(model, train_trajectories, val_trajectories=None, epochs=20, batch_size=4, lr=1e-4, device='cuda'):
+def train_decision_transformer(model, train_trajectories, epochs=20, batch_size=4, lr=1e-4, device='cuda'):
     model = model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     criterion = nn.CrossEntropyLoss()
@@ -206,19 +206,15 @@ def train_decision_transformer(model, train_trajectories, val_trajectories=None,
 
     train_dataset = TrajectoryDataset(train_trajectories, max_len=model.max_len, device=device)
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    if val_trajectories is not None:
-        val_dataset = TrajectoryDataset(val_trajectories, max_len=model.max_len, device=device)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     # 记录训练过程中的指标
     train_losses_history = []
     train_accs_history = []
-    val_losses_history = []
-    val_accs_history = []
     epochs_history = []
 
-    best_val_acc = 0.0
-    best_val_loss = float('inf')
+    # 确保模型保存目录存在
+    os.makedirs('../Models', exist_ok=True)
+
     for epoch in range(epochs):
         # 训练
         model.train()
@@ -249,50 +245,17 @@ def train_decision_transformer(model, train_trajectories, val_trajectories=None,
         train_losses_history.append(train_loss)
         train_accs_history.append(train_acc)
 
-        # 验证
-        if val_trajectories is not None:
-            model.eval()
-            val_loss, val_correct, val_total = 0, 0, 0
-            val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{epochs} [Val]', leave=False)
-            with torch.no_grad():
-                for batch in val_pbar:
-                    states, actions, rtgs, timesteps = batch['states'], batch['actions'], batch['rtgs'], batch['timesteps']
-                    action_pred = model(states, actions, rtgs, timesteps)
-                    loss = criterion(action_pred.view(-1, model.action_dim), actions.view(-1))
-                    val_loss += loss.item()
-                    pred = torch.argmax(action_pred, dim=-1)
-                    val_correct += (pred == actions).sum().item()
-                    val_total += actions.numel()
-                    
-                    # 更新进度条显示
-                    current_val_acc = val_correct / val_total if val_total > 0 else 0
-                    val_pbar.set_postfix({'Loss': f'{loss.item():.4f}', 'Acc': f'{current_val_acc:.4f}'})
-            
-            val_acc = val_correct / val_total
-            val_loss = val_loss / len(val_loader)
-            
-            # 记录验证指标
-            val_losses_history.append(val_loss)
-            val_accs_history.append(val_acc)
-            
-            scheduler.step(val_loss)
-            logging.info(f'Epoch {epoch+1}: Train Loss {train_loss:.4f}, Acc {train_acc:.4f} | Val Loss {val_loss:.4f}, Acc {val_acc:.4f}')
-            # 保存最佳模型
-            if val_acc > best_val_acc or (val_acc == best_val_acc and val_loss < best_val_loss):
-                best_val_acc = val_acc
-                best_val_loss = val_loss
-                torch.save(model.state_dict(), '../Models/dt_model_best.pth')
-        else:
-            # 没有验证集时记录None
-            val_losses_history.append(None)
-            val_accs_history.append(None)
-            
-            scheduler.step(train_loss)
-            logging.info(f'Epoch {epoch+1}: Train Loss {train_loss:.4f}, Acc {train_acc:.4f}')
+        scheduler.step(train_loss)
+        logging.info(f'Epoch {epoch+1}: Train Loss {train_loss:.4f}, Acc {train_acc:.4f}')
+        
+        # 保存每个epoch的模型
+        model_path = f'../Models/dt_model_{epoch+1}.pth'
+        torch.save(model.state_dict(), model_path)
+        logging.info(f'模型已保存到 {model_path}')
         
     # 训练结束后绘制学习曲线
     plot_learning_curves(epochs_history, train_losses_history, train_accs_history, 
-                         val_losses_history, val_accs_history, has_validation=val_trajectories is not None)
+                         None, None, has_validation=False)
 
 def plot_learning_curves(epochs, train_losses, train_accs, val_losses, val_accs, has_validation=True):
     """
@@ -383,9 +346,6 @@ if __name__ == "__main__":
         logging.error(f"未找到轨迹文件 {traj_file}，请先运行轨迹收集")
         exit()
 
-    # 划分训练/验证集（9:1）
-    train_trajs, val_trajs = train_test_split(trajectories, test_size=0.1, random_state=42)
-
     # 设置设备
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     logging.info(f"使用设备: {device}")
@@ -404,16 +364,11 @@ if __name__ == "__main__":
     logging.info("开始训练模型...")
     train_decision_transformer(
         model=model,
-        train_trajectories=train_trajs,
-        val_trajectories=val_trajs,
+        train_trajectories=trajectories,
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         device=device
     )
 
-    os.makedirs('../Models', exist_ok=True)
-    model_name = os.path.splitext(os.path.basename(traj_file))[0]
-    model_path = f'../Models/dt_model_{model_name}.pth'
-    torch.save(model.state_dict(), model_path)
-    logging.info(f"模型已保存到 {model_path}")
+    logging.info("训练完成")
